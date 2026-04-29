@@ -77,24 +77,48 @@ export default function Votacao() {
     if (assembleiaId) carregarDados();
   }, [assembleiaId, router]);
 
-  // 🔔 Escuta mudanças no status da assembleia em tempo real
+  // 🔔 Listener em tempo real para encerramento (MANTENHA APENAS ESTE)
   useEffect(() => {
     if (!assembleiaId) return;
+    console.log('🔔 Criando listener para assembleia:', assembleiaId);
 
-    // Busca o documento real do Firestore para escutar
-    const q = query(collection(db, 'assembleias'), where('id', '==', assembleiaId), limit(1));
+    const q = query(
+      collection(db, 'assembleias'),
+      where('id', '==', assembleiaId),
+      limit(1)
+    );
 
     const unsub = onSnapshot(q, (snapshot) => {
+      console.log('📡 Snapshot recebido:', snapshot.docs.length, 'documentos');
+
       if (!snapshot.empty) {
-        const statusAtual = snapshot.docs[0].data().status;
-        if (statusAtual === 'encerrada') {
-          alert('🔒 A votação foi encerrada pelo síndico.');
-          router.push(`/resultados/${assembleiaId}`);
+        const dados = snapshot.docs[0].data();
+        console.log('📊 Status atual:', dados.status);
+        console.log('📄 Dados completos:', dados);
+
+        if (dados.status === 'encerrada') {
+          console.log(' ASSEMBLEIA ENCERRADA! Redirecionando...');
+          setMensagem('🔒 Votação encerrada! Redirecionando...');
+          setCarregando(true);
+          setOpcaoSelecionada('');
+          setMostrarConfirmacao(false);
+
+          setTimeout(() => {
+            console.log('➡️ Redirecionando para:', `/resultados/${assembleiaId}`);
+            router.push(`/resultados/${assembleiaId}`);
+          }, 1200);
         }
+      } else {
+        console.log('❌ Nenhum documento encontrado');
       }
+    }, (error) => {
+      console.error('❌ Erro no listener:', error);
     });
 
-    return () => unsub();
+    return () => {
+      console.log('🧹 Limpando listener');
+      unsub();
+    };
   }, [assembleiaId, router]);
 
   function selecionarOpcao(opcao) {

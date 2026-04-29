@@ -83,7 +83,7 @@ export default function HistoricoAssembleias() {
         <div className="flex justify-between items-center mb-8">
           <h1 className="text-3xl font-bold text-white">📊 Histórico de Assembleias</h1>
           <button onClick={() => router.push('/admin')} className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition">
-            Voltar
+            Painel do síndico
           </button>
         </div>
 

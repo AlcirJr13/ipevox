@@ -28,23 +28,22 @@ export default function Resultados() {
     typeof window !== 'undefined' && sessionStorage.getItem('is_admin') === 'true'
   );
 
-
+  // ✅ 1. Busca inicial para pegar o ID real do Firestore
   useEffect(() => {
     async function carregarDadosIniciais() {
       if (!id) {
-        setErro('ID da assembleia não fornecido.');
+        setErro('ID não fornecido');
         setCarregando(false);
         return;
       }
 
       try {
-        // 🔍 Busca a assembleia pelo campo 'id' personalizado
+        // Busca pelo campo 'id' personalizado
         const q = query(collection(db, 'assembleias'), where('id', '==', id));
         const snapshot = await getDocs(q);
 
         if (snapshot.empty) {
-          console.error('Assembleia não encontrada com ID:', id);
-          setErro(`Assembleia "${id}" não encontrada.`);
+          setErro('Assembleia não encontrada');
           setCarregando(false);
           return;
         }
@@ -52,37 +51,9 @@ export default function Resultados() {
         const docSnap = snapshot.docs[0];
         setAssembleiaDocId(docSnap.id); // Salva o ID real do Firestore
         setAssembleia(docSnap.data());
-
-        // 🔔 Listener em tempo real para votos
-        const qVotos = query(collection(db, 'votos'), where('assembleiaId', '==', id));
-
-        const unsubVotos = onSnapshot(
-          qVotos,
-          (snapshot) => {
-            const agrupamento = {};
-
-            snapshot.forEach(doc => {
-              const { propostaId, opcao } = doc.data();
-              if (!agrupamento[propostaId]) {
-                agrupamento[propostaId] = {};
-              }
-              agrupamento[propostaId][opcao] = (agrupamento[propostaId][opcao] || 0) + 1;
-            });
-
-            setVotosAgrupados(agrupamento);
-            setCarregando(false);
-          },
-          (error) => {
-            console.error('Erro no listener de votos:', error);
-            setCarregando(false);
-          }
-        );
-
-        return () => unsubVotos();
-
       } catch (error) {
         console.error('Erro ao carregar:', error);
-        setErro(`Erro: ${error.message}`);
+        setErro('Erro ao carregar dados');
         setCarregando(false);
       }
     }
@@ -90,9 +61,51 @@ export default function Resultados() {
     carregarDadosIniciais();
   }, [id]);
 
+  // ✅ 2. Listeners em tempo real (só rodam depois que assembleiaDocId estiver definido)
+  useEffect(() => {
+    if (!assembleiaDocId || !id) return;
+
+    // Listener da assembleia
+    const unsubAssembleia = onSnapshot(
+      doc(db, 'assembleias', assembleiaDocId),
+      (snap) => {
+        if (snap.exists()) {
+          console.log('📊 Resultados: Assembleia atualizada:', snap.data().status);
+          setAssembleia(snap.data());
+        }
+      },
+      (error) => {
+        console.error('Erro ao escutar assembleia:', error);
+      }
+    );
+
+    // Listener dos votos
+    const unsubVotos = onSnapshot(
+      query(collection(db, 'votos'), where('assembleiaId', '==', id)),
+      (snapshot) => {
+        const agrupamento = {};
+        snapshot.forEach(doc => {
+          const { propostaId, opcao } = doc.data();
+          if (!agrupamento[propostaId]) agrupamento[propostaId] = {};
+          agrupamento[propostaId][opcao] = (agrupamento[propostaId][opcao] || 0) + 1;
+        });
+        setVotosAgrupados(agrupamento);
+        setCarregando(false);
+      },
+      (error) => {
+        console.error('Erro ao escutar votos:', error);
+        setCarregando(false);
+      }
+    );
+
+    return () => {
+      unsubAssembleia();
+      unsubVotos();
+    };
+  }, [assembleiaDocId, id]);
+
   async function encerrarAssembleia() {
     if (!assembleia || !assembleiaDocId) return;
-
     if (window.confirm('⚠️ Tem certeza? Após encerrar, nenhum novo voto será aceito.')) {
       try {
         await updateDoc(doc(db, 'assembleias', assembleiaDocId), { status: 'encerrada' });
@@ -101,6 +114,22 @@ export default function Resultados() {
         console.error('Erro ao encerrar:', error);
         alert('❌ Erro ao encerrar assembleia.');
       }
+    }
+  }
+
+  async function baixarPDF() {
+    if (!assembleia) return;
+    try {
+      const relatorio = <RelatorioPDF assembleia={assembleia} votosAgrupados={votosAgrupados} />;
+      const blob = await pdf(relatorio).toBlob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `resultado-${assembleia.titulo.toLowerCase().replace(/\s+/g, '-')}.pdf`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Erro ao gerar PDF:', error);
     }
   }
 
@@ -142,7 +171,7 @@ export default function Resultados() {
                 {assembleia.status === 'ativa' ? '🟢 Em andamento' : '🔴 Encerrada'}
               </span>
               <span className="text-gray-500 text-sm">
-                {assembleia.criadoEm?.seconds ? new Date(assembleia.criadoEm.seconds * 1000).toLocaleDateString() : ''}
+                {assembleia.criadoEm?.seconds ? new Date(assembleia.criadoEm.seconds * 1000).toLocaleDateString('pt-BR') : ''}
               </span>
             </div>
           </div>
@@ -153,23 +182,32 @@ export default function Resultados() {
                 onClick={baixarPDF}
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition"
               >
-                📄 Baixar PDF
+                📄 Baixar Relatório
               </button>
             )}
 
             {isAdmin && assembleia.status === 'ativa' && (
-              <>
-                <button onClick={encerrarAssembleia} className="px-4 py-2 bg-red-900/50 hover:bg-red-900/80 text-red-300 border border-red-800 rounded-lg text-sm transition">
-                  🔒 Encerrar Votação
-                </button>
-              </>
+              <button
+                onClick={encerrarAssembleia}
+                className="px-4 py-2 bg-red-900/50 hover:bg-red-900/80 text-red-300 border border-red-800 rounded-lg text-sm transition"
+              >
+                🔒 Encerrar Votação
+              </button>
             )}
+
             {isAdmin && (
-              <button onClick={() => router.push('/admin/historico')} className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition">
+              <button
+                onClick={() => router.push('/admin/historico')}
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition"
+              >
                 Histórico
               </button>
             )}
-            <button onClick={() => router.push('/')} className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition">
+
+            <button
+              onClick={() => router.push('/')}
+              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition"
+            >
               Sair
             </button>
           </div>
@@ -194,7 +232,6 @@ export default function Resultados() {
                   {prop.opcoes?.map((opcao) => {
                     const count = votosProp[opcao] || 0;
                     const pct = totalVotos > 0 ? Math.round((count / totalVotos) * 100) : 0;
-
                     const corBarra = pct >= 50 ? 'bg-green-500' : pct >= 30 ? 'bg-blue-500' : 'bg-gray-600';
 
                     return (
@@ -220,15 +257,4 @@ export default function Resultados() {
       </div>
     </main>
   );
-}
-
-async function baixarPDF() {
-  const relatorio = <RelatorioPDF assembleia={assembleia} votosAgrupados={votosAgrupados} />;
-  const blob = await pdf(relatorio).toBlob();
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `resultado-${assembleia.titulo.toLowerCase().replace(/\s+/g, '-')}.pdf`;
-  link.click();
-  URL.revokeObjectURL(url);
 }

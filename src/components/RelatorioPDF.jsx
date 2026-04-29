@@ -50,7 +50,10 @@ const RelatorioPDF = ({ assembleia, votosAgrupados }) => {
     <Document>
       <Page size="A4" style={styles.page}>
         <View style={styles.header}>
-          <Text style={styles.title}>🌳 ipevox - Relatório de Votação</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 10 }}>
+            <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#3B82F6' }}>IPEVOX</Text>
+            <Text style={{ fontSize: 14, color: '#4B5563', marginLeft: 5 }}>| Relatório de Votação</Text>
+          </View>
           <Text style={styles.subtitle}>{assembleia.titulo}</Text>
           <Text style={{ fontSize: 10, color: '#6B7280' }}>
             Data: {new Date(assembleia.criadoEm?.seconds * 1000).toLocaleDateString('pt-BR')} |
