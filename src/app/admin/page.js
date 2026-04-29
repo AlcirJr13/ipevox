@@ -9,32 +9,43 @@ import { useEffect, useRef, useState } from 'react';
 export default function Admin() {
   const router = useRouter();
 
-  useEffect(() => {
-    if (sessionStorage.getItem('is_admin') !== 'true') {
-      router.push('/admin/login');
+  // ✅ Verificação de login
+  const [isAdmin, setIsAdmin] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return sessionStorage.getItem('is_admin') === 'true';
     }
-  }, []);
+    return false;
+  });;
 
   const [modo, setModo] = useState('assembleia'); // 'assembleia' ou 'rapida'
   const propostasRef = useRef(null);
-
-  // Campos da assembleia/votação
-  const [titulo, setTitulo] = useState('');
-  const [descricao, setDescricao] = useState('');
-
-  // Propostas (para ambos modos)
   const [propostas, setPropostas] = useState([{
     titulo: '',
     descricao: '',
     opcoes: ['Sim', 'Não', 'Abstenção']
   }]);
-
-  // Estado do QR Code
   const [criado, setCriado] = useState(false);
   const [linkAssembleia, setLinkAssembleia] = useState('');
   const [carregando, setCarregando] = useState(false);
   const [erro, setErro] = useState('');
+  const [titulo, setTitulo] = useState('');
+  const [descricao, setDescricao] = useState('');
 
+  // Redireciona se não estiver logado
+  useEffect(() => {
+    if (!isAdmin) {
+      router.push('/admin/login');
+    }
+  }, [isAdmin, router]);
+
+  // Mostra loading enquanto verifica
+  if (!isAdmin) {
+    return (
+      <main className="min-h-screen flex items-center justify-center">
+        <p className="text-gray-400 animate-pulse">Redirecionando...</p>
+      </main>
+    );
+  }
 
   // Adiciona nova proposta
   function addProposta() {
@@ -202,12 +213,12 @@ export default function Admin() {
           <h1 className="text-3xl font-bold text-white">⚙️ Painel do Síndico</h1>
           <button
             onClick={() => router.push('/admin/historico')}
-            className="text-gray-400 hover:text-white mr-4"
+            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition"
           >
             📊 Histórico
           </button>
-          <button onClick={() => router.push('/')} className="text-gray-400 hover:text-white">
-            ← Voltar
+          <button onClick={() => router.push('/')} className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition">
+            Voltar
           </button>
         </div>
 
