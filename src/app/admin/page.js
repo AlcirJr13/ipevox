@@ -194,10 +194,10 @@ export default function Admin() {
                 Criar outra
               </button>
               <button
-                onClick={() => router.push('/')}
+                onClick={() => router.push('/admin/historico')}
                 className="py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition"
               >
-                Ir para Landing
+                Ir Histórico
               </button>
             </div>
           </div>
@@ -211,12 +211,20 @@ export default function Admin() {
       <div className="max-w-3xl mx-auto">
         <div className="flex justify-between items-center mb-8">
           <h1 className="text-3xl font-bold text-white">⚙️ Painel do Síndico</h1>
-          <button
-            onClick={() => router.push('/admin/historico')}
-            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition"
-          >
-            📊 Histórico
-          </button>
+          <div className="flex gap-3">
+            <button
+              onClick={() => router.push('/admin/unidades')}
+              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition"
+            >
+              🏠 Unidades
+            </button>
+            <button
+              onClick={() => router.push('/admin/historico')}
+              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition"
+            >
+              📊 Histórico
+            </button>
+          </div>
           <button onClick={() => router.push('/')} className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition">
             Sair
           </button>

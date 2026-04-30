@@ -1,7 +1,7 @@
 "use client";
 
 import { db } from '@/lib/firebase';
-import { collection, doc, getDocs, orderBy, query, updateDoc, where } from 'firebase/firestore';
+import { collection, doc, onSnapshot, orderBy, query, updateDoc, where } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { QRCodeSVG } from 'qrcode.react';
 import { useEffect, useState } from 'react';
@@ -13,34 +13,30 @@ export default function HistoricoAssembleias() {
   const [carregando, setCarregando] = useState(true);
   const [qrCodeAssembleia, setQrCodeAssembleia] = useState(null);
 
+  // 🔔 Listener em tempo real para assembleias
   useEffect(() => {
-    async function carregarAssembleias() {
-      setCarregando(true);
-      try {
-        let q;
-        if (filtro === 'ativas') {
-          q = query(collection(db, 'assembleias'), where('status', '==', 'ativa'), orderBy('criadoEm', 'desc'));
-        } else if (filtro === 'encerradas') {
-          q = query(collection(db, 'assembleias'), where('status', '==', 'encerrada'), orderBy('criadoEm', 'desc'));
-        } else {
-          q = query(collection(db, 'assembleias'), orderBy('criadoEm', 'desc'));
-        }
-
-        const snapshot = await getDocs(q);
-        // ✅ Importante: guardamos o doc.id (ID real do Firestore) separadamente
-        const lista = snapshot.docs.map(doc => ({
-          docId: doc.id,  // ID real do Firestore
-          ...doc.data()   // Dados (incluindo o campo 'id' personalizado)
-        }));
-        setAssembleias(lista);
-      } catch (error) {
-        console.error('Erro ao carregar:', error);
-      } finally {
-        setCarregando(false);
-      }
+    let q;
+    if (filtro === 'ativas') {
+      q = query(collection(db, 'assembleias'), where('status', '==', 'ativa'), orderBy('criadoEm', 'desc'));
+    } else if (filtro === 'encerradas') {
+      q = query(collection(db, 'assembleias'), where('status', '==', 'encerrada'), orderBy('criadoEm', 'desc'));
+    } else {
+      q = query(collection(db, 'assembleias'), orderBy('criadoEm', 'desc'));
     }
 
-    carregarAssembleias();
+    const unsub = onSnapshot(q, (snapshot) => {
+      const lista = snapshot.docs.map((docSnap) => ({
+        docId: docSnap.id,
+        ...docSnap.data(),
+      }));
+      setAssembleias(lista);
+      setCarregando(false);
+    }, (error) => {
+      console.error('Erro no listener:', error);
+      setCarregando(false);
+    });
+
+    return () => unsub();
   }, [filtro]);
 
   async function encerrarAssembleia(docId) {
@@ -49,27 +45,13 @@ export default function HistoricoAssembleias() {
 
     try {
       await updateDoc(doc(db, 'assembleias', docId), { status: 'encerrada' });
-
-      // ✅ Remove o item da lista visualmente
-      setAssembleias(assembleiasAnteriores =>
-        assembleiasAnteriores.filter(asb => asb.docId !== docId)
-      );
-
-      // Se estiver no filtro "ativas", recarrega para garantir consistência
-      if (filtro === 'ativas') {
-        // Opcional: recarregar do banco após 1 segundo
-        setTimeout(() => {
-          // Força uma atualização recarregando o filtro atual
-          setFiltro('ativas');
-        }, 1000);
-      }
-
+      // ✅ O onSnapshot atualiza a lista automaticamente em tempo real
     } catch (error) {
       console.error('Erro ao encerrar:', error);
       alert('❌ Erro ao encerrar assembleia.');
     }
   }
-  // Função para abrir modal do QR Code
+
   function abrirQRCode(assembleia) {
     setQrCodeAssembleia(assembleia);
   }
@@ -77,6 +59,7 @@ export default function HistoricoAssembleias() {
   function fecharQRCode() {
     setQrCodeAssembleia(null);
   }
+
   return (
     <main className="min-h-screen py-12 px-4">
       <div className="max-w-6xl mx-auto">
@@ -136,7 +119,6 @@ export default function HistoricoAssembleias() {
                     Ver Resultados
                   </button>
 
-                  {/* ✅ Botão para mostrar QR Code (apenas para ativas) */}
                   {asb.status === 'ativa' && (
                     <button
                       onClick={() => abrirQRCode(asb)}
@@ -146,10 +128,9 @@ export default function HistoricoAssembleias() {
                     </button>
                   )}
 
-                  {/* Botão de Encerrar (apenas se estiver ativa) */}
                   {asb.status === 'ativa' && (
                     <button
-                      onClick={() => encerrarAssembleia(asb.docId)}  // ✅ Usa docId
+                      onClick={() => encerrarAssembleia(asb.docId)}
                       className="px-4 py-2 bg-red-900/40 hover:bg-red-900/70 text-red-300 border border-red-900 rounded-lg text-sm transition flex items-center gap-2"
                     >
                       🔒 Encerrar Agora
@@ -161,7 +142,7 @@ export default function HistoricoAssembleias() {
           </div>
         )}
       </div>
-      {/* Modal do QR Code */}
+
       {qrCodeAssembleia && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={fecharQRCode}>
           <div className="bg-gray-800 rounded-2xl p-8 max-w-md w-full text-center border border-gray-700 shadow-2xl" onClick={(e) => e.stopPropagation()}>

@@ -72,23 +72,48 @@ export default function Checkin() {
         return;
       }
 
-      // 🔒 TRANSACÇÃO ATÔMICA - Previne race condition
+      // 🔒 PASSO 1: Verificar se a unidade existe no catálogo do condomínio
+      const catalogoRef = collection(db, 'catalogo_unidades');
+      const qCatalogo = query(catalogoRef, where('numero', '==', valor));
+      const snapCatalogo = await getDocs(qCatalogo);
+
+      if (snapCatalogo.empty) {
+        setMensagem({ tipo: 'erro', texto: '🚫 Unidade não cadastrada no condomínio. Contate o síndico.' });
+        setCarregando(false);
+        return;
+      }
+
+      const unidadeCatalogo = snapCatalogo.docs[0];
+      const dadosCatalogo = unidadeCatalogo.data();
+
+      if (dadosCatalogo.ativo === false) {
+        setMensagem({ tipo: 'erro', texto: '🚫 Esta unidade está desativada. Contate o síndico.' });
+        setCarregando(false);
+        return;
+      }
+
+      // 🔒 PASSO 2: Verificar/criar registro de sessão na assembleia
       const unidadesRef = collection(db, 'unidades');
-      const q = query(
+      const qSessao = query(
         unidadesRef,
         where('assembleiaId', '==', assembleiaId),
-        where('numero', '==', valor)
+        where('catalogoUnidadeId', '==', unidadeCatalogo.id)
       );
+
+      // Timeout: se sessão está 'votando' há mais de 10 min, considera abandonada
+      const TIMEOUT_MINUTOS = 10;
+      const agora = Date.now();
 
       // Usa transação para garantir atomicidade
       await runTransaction(db, async (transaction) => {
-        const snapshot = await getDocs(q);
+        const snapshot = await getDocs(qSessao);
 
         if (snapshot.empty) {
-          // Unidade não existe: cria nova com status 'votando'
+          // Primeira vez nesta assembleia: cria registro de sessão
           const novaUnidadeRef = doc(unidadesRef);
           transaction.set(novaUnidadeRef, {
             assembleiaId,
+            catalogoUnidadeId: unidadeCatalogo.id,
             numero: valor,
             status: 'votando',
             criadoEm: serverTimestamp()
@@ -109,10 +134,28 @@ export default function Checkin() {
         }
 
         if (unidadeData.status === 'votando') {
-          throw new Error('Esta unidade já está votando em outro dispositivo.');
+          // 🔒 Verifica se está presa (mais de 10 min sem atividade)
+          const ultimaAtualizacao = unidadeData.ultimaAtualizacao?.toDate?.()
+            || unidadeData.criadoEm?.toDate?.();
+
+          if (ultimaAtualizacao) {
+            const diffMinutos = (agora - ultimaAtualizacao.getTime()) / 60000;
+            if (diffMinutos < TIMEOUT_MINUTOS) {
+              const restante = Math.ceil(TIMEOUT_MINUTOS - diffMinutos);
+              throw new Error(`Esta unidade está votando em outro dispositivo. Libera em ${restante} min.`);
+            }
+          }
+
+          // Timeout expirado: reseta e permite continuar
+          transaction.update(unidadeRef, {
+            status: 'votando',
+            ultimaAtualizacao: serverTimestamp()
+          });
+          sessionStorage.setItem(`unidade_${assembleiaId}`, unidadeDoc.id);
+          return;
         }
 
-        // Atualiza para 'votando' atomicamente
+        // Status não esperado: atualiza para votando
         transaction.update(unidadeRef, {
           status: 'votando',
           ultimaAtualizacao: serverTimestamp()

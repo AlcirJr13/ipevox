@@ -5,6 +5,7 @@ import {
   addDoc,
   collection,
   doc,
+  getDoc,
   getDocs,
   limit,
   onSnapshot,
@@ -32,7 +33,7 @@ export default function Votacao() {
   const [mostrarConfirmacao, setMostrarConfirmacao] = useState(false);
   const [carregandoDados, setCarregandoDados] = useState(true);
 
-  // Carrega dados da assembleia e unidade
+  // Carrega dados iniciais da assembleia e sessão
   useEffect(() => {
     async function carregarDados() {
       try {
@@ -46,7 +47,6 @@ export default function Votacao() {
 
         const assembleiaData = snapAssembleia.docs[0].data();
 
-        // Verifica se está encerrada
         if (assembleiaData.status === 'encerrada') {
           router.push(`/resultados/${assembleiaId}`);
           return;
@@ -55,16 +55,42 @@ export default function Votacao() {
         setAssembleia(assembleiaData);
         setPropostas(assembleiaData.propostas || []);
 
-        // Busca unidade atual
-        const qUnidades = query(
-          collection(db, 'unidades'),
-          where('assembleiaId', '==', assembleiaId),
-          where('status', '==', 'votando')
-        );
-        const snapUnidades = await getDocs(qUnidades);
+        // 🔒 Busca sessão da unidade pelo ID do sessionStorage
+        const sessaoId = sessionStorage.getItem(`unidade_${assembleiaId}`);
+        if (!sessaoId) {
+          router.push(`/checkin/${assembleiaId}`);
+          return;
+        }
 
-        if (!snapUnidades.empty) {
-          setUnidadeId(snapUnidades.docs[0].id);
+        const sessaoSnap = await getDoc(doc(db, 'unidades', sessaoId));
+
+        if (!sessaoSnap.exists()) {
+          router.push(`/checkin/${assembleiaId}`);
+          return;
+        }
+
+        const sessaoData = sessaoSnap.data();
+        setUnidadeId(sessaoId);
+
+        // 🔒 Verifica quais propostas já foram votadas
+        const votosComputados = sessaoData.votosComputados || {};
+        const indicesVotados = [];
+        propostas.forEach((p, idx) => {
+          if (votosComputados[p.titulo]) {
+            indicesVotados.push(idx);
+          }
+        });
+
+        if (indicesVotados.length === assembleiaData.propostas.length) {
+          router.push(`/resultados/${assembleiaId}`);
+          return;
+        }
+
+        setVotosEnviados(indicesVotados);
+
+        const proximoNaoVotado = assembleiaData.propostas.findIndex((p, idx) => !indicesVotados.includes(idx));
+        if (proximoNaoVotado !== -1) {
+          setIndiceAtual(proximoNaoVotado);
         }
 
         setCarregandoDados(false);
@@ -77,10 +103,9 @@ export default function Votacao() {
     if (assembleiaId) carregarDados();
   }, [assembleiaId, router]);
 
-  // 🔔 Listener em tempo real para encerramento (MANTENHA APENAS ESTE)
+  // 🔔 Listener em tempo real para assembleia (atualiza dados + detecta encerramento)
   useEffect(() => {
     if (!assembleiaId) return;
-    console.log('🔔 Criando listener para assembleia:', assembleiaId);
 
     const q = query(
       collection(db, 'assembleias'),
@@ -89,37 +114,27 @@ export default function Votacao() {
     );
 
     const unsub = onSnapshot(q, (snapshot) => {
-      console.log('📡 Snapshot recebido:', snapshot.docs.length, 'documentos');
-
       if (!snapshot.empty) {
         const dados = snapshot.docs[0].data();
-        console.log('📊 Status atual:', dados.status);
-        console.log('📄 Dados completos:', dados);
 
-        if (dados.status === 'encerrada') {
-          console.log(' ASSEMBLEIA ENCERRADA! Redirecionando...');
-          setMensagem('🔒 Votação encerrada! Redirecionando...');
-          setCarregando(true);
-          setOpcaoSelecionada('');
-          setMostrarConfirmacao(false);
-
+        // Se estava ativa e agora é encerrada → redireciona
+        if (dados.status === 'encerrada' && assembleia?.status !== 'encerrada') {
+          setMensagem('Votação encerrada! Redirecionando...');
           setTimeout(() => {
-            console.log('➡️ Redirecionando para:', `/resultados/${assembleiaId}`);
             router.push(`/resultados/${assembleiaId}`);
-          }, 1200);
+          }, 1500);
         }
-      } else {
-        console.log('❌ Nenhum documento encontrado');
+
+        // Atualiza dados em tempo real
+        setAssembleia(dados);
+        setPropostas(dados.propostas || []);
       }
     }, (error) => {
-      console.error('❌ Erro no listener:', error);
+      console.error(' Erro no listener:', error);
     });
 
-    return () => {
-      console.log('🧹 Limpando listener');
-      unsub();
-    };
-  }, [assembleiaId, router]);
+    return () => unsub();
+  }, [assembleiaId, router, assembleia?.status]);
 
   function selecionarOpcao(opcao) {
     setOpcaoSelecionada(opcao);
@@ -135,17 +150,22 @@ export default function Votacao() {
     try {
       const propostaAtual = propostas[indiceAtual];
 
-      // Salva voto anônimo
       await addDoc(collection(db, 'votos'), {
         assembleiaId,
         propostaId: propostaAtual.titulo,
         opcao: opcaoSelecionada,
+        unidadeDocId: unidadeId,
         timestamp: serverTimestamp()
       });
 
-      // Marca unidade como votada APENAS se for a última proposta
+      const sessaoRef = doc(db, 'unidades', unidadeId);
+      await updateDoc(sessaoRef, {
+        [`votosComputados.${propostaAtual.titulo}`]: true,
+        ultimaAtualizacao: serverTimestamp()
+      });
+
       if (indiceAtual === propostas.length - 1) {
-        await updateDoc(doc(db, 'unidades', unidadeId), { status: 'votado' });
+        await updateDoc(sessaoRef, { status: 'votado' });
       }
 
       setVotosEnviados([...votosEnviados, indiceAtual]);
@@ -153,13 +173,11 @@ export default function Votacao() {
       setOpcaoSelecionada('');
       setMostrarConfirmacao(false);
 
-      // Avança para próxima proposta APENAS se existir
       setTimeout(() => {
         if (indiceAtual < propostas.length - 1) {
           setIndiceAtual(indiceAtual + 1);
           setMensagem('');
         } else {
-          // Última proposta: redireciona para resultados
           router.push(`/resultados/${assembleiaId}`);
         }
       }, 1500);
@@ -174,7 +192,6 @@ export default function Votacao() {
 
   function proximaProposta() {
     if (indiceAtual < propostas.length - 1) {
-      // ✅ Confirmação antes de pular
       const confirmou = window.confirm(
         `⚠️ Você está prestes a pular a proposta "${propostas[indiceAtual].titulo}".\n\nTem certeza que deseja continuar sem votar?`
       );
@@ -204,7 +221,6 @@ export default function Votacao() {
     );
   }
 
-  // Se já votou todas as propostas
   if (votosEnviados.length === propostas.length) {
     return (
       <main className="min-h-screen flex items-center justify-center p-4">
@@ -231,7 +247,6 @@ export default function Votacao() {
   return (
     <main className="min-h-screen py-8 px-4">
       <div className="max-w-xl mx-auto">
-        {/* Header com progresso */}
         <div className="mb-6">
           <div className="flex justify-between items-center mb-2">
             <h1 className="text-xl font-bold text-white">🗳️ Votação</h1>
@@ -247,14 +262,12 @@ export default function Votacao() {
           </div>
         </div>
 
-        {/* Mensagem de sucesso */}
         {mensagem && (
           <div className="mb-4 p-3 bg-green-900/30 text-green-300 rounded-lg text-center font-medium border border-green-800">
             {mensagem}
           </div>
         )}
 
-        {/* Card da Proposta */}
         <div className="bg-gray-800 rounded-xl shadow-lg p-6 border border-gray-700">
           <h2 className="text-xl font-semibold text-white mb-2">
             {proposta.titulo}
@@ -263,7 +276,6 @@ export default function Votacao() {
             <p className="text-gray-400 mb-6">{proposta.descricao}</p>
           )}
 
-          {/* Opções de voto */}
           <div className="space-y-3 mb-6">
             {proposta.opcoes.map((opcao, idx) => (
               <label
@@ -287,7 +299,6 @@ export default function Votacao() {
             ))}
           </div>
 
-          {/* Botões de ação */}
           <div className="flex gap-3">
             {mostrarConfirmacao && (
               <>
@@ -326,7 +337,6 @@ export default function Votacao() {
           </div>
         </div>
 
-        {/* Botão de sair */}
         <div className="mt-6 text-center">
           <button
             onClick={() => router.push('/')}
