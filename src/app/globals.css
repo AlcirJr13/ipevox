@@ -24,3 +24,32 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/*
+ * PONTEIRO DE MÃO EM TODO BOTÃO.
+ *
+ * O Tailwind 4 zera o `cursor` dos botões no preflight (`cursor: default`), para
+ * alinhar com o comportamento do CSS moderno. O efeito prático é que um botão
+ * não parece clicável: passa-se o mouse e nada muda.
+ *
+ * A correção fica aqui, uma vez, em vez de espalhar `cursor-pointer` por cada
+ * botão do sistema — eram mais de sessenta, e o próximo a ser escrito voltaria a
+ * nascer sem o ponteiro.
+ *
+ * `:not(:disabled)` preserva o comportamento correto de botão desabilitado, que
+ * deve mesmo mostrar o cursor padrão e sinalizar que não responde.
+ */
+@layer base {
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']),
+  summary,
+  label[for],
+  select:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled='true'] {
+    cursor: not-allowed;
+  }
+}

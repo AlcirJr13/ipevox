@@ -1,0 +1,53 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "votos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assembleiaId", "order": "ASCENDING" },
+        { "fieldPath": "propostaId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "votos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assembleiaId", "order": "ASCENDING" },
+        { "fieldPath": "criadoEm", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "apuracao",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assembleiaId", "order": "ASCENDING" },
+        { "fieldPath": "propostaId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "comprovantes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assembleiaId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "auditoria",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "assembleiaId", "order": "ASCENDING" },
+        { "fieldPath": "em", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "catalogo_unidades",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ativo", "order": "ASCENDING" },
+        { "fieldPath": "numero", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

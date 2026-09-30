@@ -13,15 +13,16 @@ const geistMono = Geist_Mono({
 
 export const metadata = {
   title: 'ipevox - Votação Condominial',
-  description: 'Assembleias mais ágeis, votos secretos e resultados em tempo real.',
+  description: 'Assembleias mais ágeis, com sigilo declarado e contagem publicada no encerramento.',
   // Extras para ficar bonito ao compartilhar no WhatsApp/Telegram:
   openGraph: {
     title: 'ipevox',
-    description: 'Votação condominial simplificada.',
+    description: 'Votação condominial com sigilo declarado: aberta ou restrita.',
   },
-  icons: {
-    icon: '/favicon.png',
-  },
+  // O `icons` apontava para `/favicon.png`, arquivo que não existe em /public —
+  // o Next.js procurava em vão e servia o 404 no lugar do ícone. A convenção de
+  // arquivo do App Router já resolve isto com `src/app/favicon.ico`, que existe
+  // no projeto, então a declaração foi removida em vez de corrigida.
 }
 
 export default function RootLayout({ children }) {

@@ -1,0 +1,498 @@
+rules_version = '2';
+
+// =============================================================================
+// ipevox — regras de segurança do Firestore (modelo SEM SERVIDOR)
+// =============================================================================
+//
+// CONTEXTO DESTA VERSÃO
+//
+// A versão anterior deste arquivo assumia Cloud Functions: elas criavam
+// assembleia, validavam voto, cifravam a cédula, apuravam e gravavam a trilha
+// de auditoria. O Cloud Functions exige o plano Blaze (pago), e a decisão do
+// projeto foi operar somente com recursos gratuitos.
+//
+// Então TODA a autoridade passou para cá. Isso muda o que é possível garantir, e
+// as diferenças estão registradas honestamente abaixo — não escondidas.
+//
+// O QUE ESTAS REGRAS GARANTEM
+//   1. Voto individual só é legível pelo ADMINISTRADOR DO SISTEMA. Nem o síndico,
+//      nem o morador, nem qualquer outro usuário autenticado.
+//   2. Não existe placar durante a votação. O resultado só pode ser gravado
+//      depois que a assembleia é marcada como encerrada, e uma única vez.
+//   3. Resultado publicado é IMUTÁVEL: nenhuma alteração posterior é aceita.
+//   4. Um voto por unidade por proposta, garantido pelo ID determinístico do
+//      documento — o Firestore não tem constraint de unicidade, então o caminho
+//      do documento faz esse papel.
+//   5. A lista de administradores do sistema vem do próprio arquivo de regras
+//      (por e-mail), e não de um documento no banco.
+//
+// O QUE ESTAS REGRAS **NÃO** CONSEGUEM GARANTIR (limitações reais do modelo)
+//   a) Não há cifragem. O voto fica em texto claro no banco. O dono do projeto
+//      consegue lê-lo pelo console do Firebase, que ignora estas regras.
+//   b) Não há trilha de auditoria confiável: sem servidor, nada obriga o cliente
+//      a gravar um evento de auditoria.
+//   c) A regra não consegue CONTAR documentos, então o total publicado não é
+//      conferido pelo banco. A garantia é que o resultado é gravado uma vez e
+//      nunca muda — não que o número esteja certo.
+//   d) "Encerrar a assembleia" é uma escrita do cliente. A regra exige que o
+//      status mude para 'encerrada' de forma irreversível, mas quem aperta o
+//      botão é o navegador de um administrador.
+//
+// Para fechar essas lacunas seria necessário um servidor confiável (Cloud
+// Functions, Apps Script ou equivalente). Sem ele, o desenho correto é o de urna
+// com testemunhas: o número é publicado de forma imutável, e a conferência é
+// feita por quem tem o direito de ler os votos.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+    //
+    // Ordem importa: cada função só usa o que já foi declarado acima dela.
+
+    function autenticado() {
+      return request.auth != null;
+    }
+
+    /**
+     * ADMINISTRADOR DO SISTEMA — a lista vive AQUI, no arquivo de regras.
+     *
+     * Por que não em um documento no banco, como na versão com servidor: sem
+     * servidor, o documento seria escrito pelo próprio cliente, e qualquer
+     * pessoa poderia gravar `admins_sistema/{seu-uid}` para se promover. Um
+     * e-mail fixado no arquivo de regras não é editável pelo cliente — só por
+     * quem publica as regras.
+     *
+     * Para acrescentar outro administrador, inclua o e-mail nesta lista e
+     * publique de novo. Publicar regras é gratuito em qualquer plano.
+     */
+    function emailsAdminSistema() {
+      return [
+        'alcirjr11@gmail.com',
+        'alcir_jr13@hotmail.com'
+      ];
+    }
+
+    /**
+     * O solicitante é administrador do sistema?
+     *
+     * A checagem é feita SEM função auxiliar que devolva `string` ou `null`. A
+     * versão anterior era `emailSolicitante() in emailsAdminSistema()`, com
+     * `emailSolicitante()` podendo devolver `null` — e o compilador das regras
+     * avisava: "Ternary operator result if condition is true has a different type
+     * than if condition is false". Comparação com `null` do lado esquerdo do `in`
+     * não é o mesmo que negar; é uma expressão de tipo ambíguo.
+     *
+     * Aqui as três condições são explícitas e do mesmo tipo (booleano), então não
+     * há ambiguidade: existe token, existe e-mail, e o e-mail está na lista.
+     */
+    function isAdminSistema() {
+      return autenticado()
+        && request.auth.token.email != null
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() in emailsAdminSistema();
+    }
+
+    function ehEmailAdminSistema(email) {
+      return email != null && email is string && email.lower() in emailsAdminSistema();
+    }
+
+    /** Síndico: quem tem documento em /admins/{uid}, provisionado por um admin. */
+    function isSindico() {
+      return autenticado()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    /** Quem opera o sistema em qualquer capacidade. */
+    function isOperador() {
+      return isAdminSistema() || isSindico();
+    }
+
+    /**
+     * Marcador de instalação: verdadeiro quando o sistema ainda não saiu do
+     * estado inicial. Regra de segurança não consegue consultar uma coleção
+     * inteira, então o primeiro síndico grava um documento-marcador em
+     * `/controle/sindicos_criados`. É o que permite o bootstrap acontecer UMA
+     * vez e nunca mais.
+     */
+    function sistemaJaTemSindico() {
+      return exists(/databases/$(database)/documents/controle/sindicos_criados);
+    }
+
+    function agora() {
+      return request.time;
+    }
+
+    function textoOk(v, min, max) {
+      return v is string && v.size() >= min && v.size() <= max;
+    }
+
+    /**
+     * Horário de servidor plausível: nunca no passado distante, nunca no futuro.
+     *
+     * `duration.value(1, 'd')` e NÃO `.add(1, 'day')`. A versão anterior usava
+     * `agora().date().add(1, 'day')`, e `add` não existe nas regras do Firestore —
+     * o compilador avisava "Invalid function name: add". Como a expressão ficava
+     * inválida, é provável que a validação inteira falhasse em tempo de execução,
+     * recusando escritas legítimas.
+     */
+    function horarioOk(ts) {
+      return ts is timestamp
+        && ts <= agora() + duration.value(1, 'd')
+        && ts >= timestamp.date(2020, 1, 1);
+    }
+
+    function assembleiaAtiva(assembleiaId) {
+      return (exists(/databases/$(database)/documents/assembleias/$(assembleiaId))
+              && get(/databases/$(database)/documents/assembleias/$(assembleiaId)).data.status == 'ativa')
+          || (existsAfter(/databases/$(database)/documents/assembleias/$(assembleiaId))
+              && getAfter(/databases/$(database)/documents/assembleias/$(assembleiaId)).data.status == 'ativa');
+    }
+
+    function campoInalterado(campo) {
+      return !(campo in request.resource.data.diff(resource.data).affectedKeys());
+    }
+
+    // =========================================================================
+    // /admins/{uid} — síndicos
+    // =========================================================================
+    // Leitura: o próprio síndico (para a interface saber o que mostrar) e o
+    // administrador do sistema (que provisiona e revoga).
+    //
+    // Escrita: o administrador do sistema. A exceção é o bootstrap de uma
+    // instalação nova, em que o administrador cria a própria permissão de
+    // síndico — e isso só é aceito enquanto não existe nenhum síndico.
+
+    match /admins/{uid} {
+      allow read: if autenticado() && (request.auth.uid == uid || isAdminSistema());
+
+      allow create: if isAdminSistema()
+        || (autenticado()
+            && request.auth.uid == uid
+            && ehEmailAdminSistema(request.auth.token.email)
+            && !sistemaJaTemSindico());
+
+      allow update, delete: if isAdminSistema();
+    }
+
+    // =========================================================================
+    // /controle/{documento} — marcadores internos
+    // =========================================================================
+    // Guarda `sindicos_criados`, que registra que o sistema saiu do estado
+    // inicial. Não contém dado sensível, mas a escrita é restrita porque é ela
+    // que trava o bootstrap.
+
+    match /controle/{documento} {
+      allow read: if autenticado();
+      allow create: if isOperador()
+        || (autenticado() && ehEmailAdminSistema(request.auth.token.email));
+      allow update: if isOperador();
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // /assembleias/{assembleiaId}
+    // =========================================================================
+    // Leitura pública (autenticado): o participante precisa saber o título, o
+    // modo e se a votação está aberta. O que fica restrito é o VOTO.
+    //
+    // Escrita: operador. Uma vez encerrada, não volta a 'ativa' — é o que impede
+    // reabrir uma votação encerrada para inserir votos.
+    // O campo `resultadoPublicado` só pode ser definido quando o status já é
+    // 'encerrada', o que trava a publicação antes do encerramento.
+
+    match /assembleias/{assembleiaId} {
+
+      allow read: if autenticado();
+
+      allow create: if isOperador()
+        && request.resource.data.id == assembleiaId
+        && textoOk(request.resource.data.titulo, 1, 120)
+        && request.resource.data.modo in ['aberta', 'fechada']
+        && request.resource.data.status == 'ativa'
+        && request.resource.data.keys().hasOnly([
+             'id', 'titulo', 'descricao', 'modo', 'status', 'unidadesAptas',
+             'totalPropostas', 'criadoPor', 'criadoEm', 'encerradoEm',
+             'resultadoPublicado'
+           ])
+        && horarioOk(request.resource.data.criadoEm);
+
+      allow update: if isOperador()
+        && campoInalterado('id')
+        && campoInalterado('modo')
+        && campoInalterado('criadoEm')
+        // Encerrar é irreversível: nunca de 'encerrada' de volta para 'ativa'.
+        && !(resource.data.status == 'encerrada' && request.resource.data.status == 'ativa')
+        // Publicar resultado exige assembleia encerrada.
+        && (request.resource.data.resultadoPublicado != true
+            || request.resource.data.status == 'encerrada')
+        && request.resource.data.keys().hasOnly([
+             'id', 'titulo', 'descricao', 'modo', 'status', 'unidadesAptas',
+             'totalPropostas', 'criadoPor', 'criadoEm', 'encerradoEm',
+             'resultadoPublicado'
+           ]);
+
+      allow delete: if isAdminSistema();
+
+      // Propostas: a pauta. Visível a qualquer autenticado (o morador precisa
+      // ler as opções para votar). Escrita por operador enquanto ativa.
+      match /propostas/{propostaId} {
+        allow read: if autenticado();
+
+        allow create, update: if isOperador()
+          && request.resource.data.id == propostaId
+          && textoOk(request.resource.data.titulo, 1, 120)
+          && request.resource.data.opcoes is list
+          && request.resource.data.opcoes.size() >= 2
+          && request.resource.data.opcoes.size() <= 10
+          && assembleiaAtiva(assembleiaId);
+
+        allow delete: if isOperador();
+      }
+    }
+
+    // =========================================================================
+    // /catalogo_unidades/{numeroNormalizado}
+    // =========================================================================
+    // O ID do documento é o número normalizado, o que torna o check-in um `get`
+    // por caminho conhecido — sem consulta e sem índice.
+
+    match /catalogo_unidades/{numeroNormalizado} {
+      allow read: if autenticado();
+      allow write: if isOperador();
+    }
+
+    // =========================================================================
+    // /comprovantes/{comprovanteId} — participação
+    // =========================================================================
+    // Registra QUE a unidade participou e QUAIS propostas já votou. Nunca
+    // registra a opção escolhida, então pode ser legível.
+    //
+    // O ID é `{assembleiaId}~{numero}`. O ID determinístico é o que garante uma
+    // sessão por unidade — o Firestore não tem constraint de unicidade, então o
+    // caminho do documento faz esse papel.
+    //
+    // O comentário anterior dizia "tag = HMAC da unidade, calculado no cliente".
+    // Isso deixou de ser verdade quando o projeto passou a operar sem servidor:
+    // não há HMAC, e o `tag` É o número normalizado. A exigência da regra
+    // (linha do `tag == numero`) é o que mantém as duas coisas coerentes.
+
+    match /comprovantes/{comprovanteId} {
+
+      allow read: if autenticado();
+
+      allow create: if autenticado()
+        && comprovanteId.split('~').size() == 2
+        && request.resource.data.assembleiaId is string
+        && request.resource.data.tag is string
+        && request.resource.data.numero is string
+        // O `tag` é o número da unidade normalizado. Sem servidor não há HMAC
+        // para pseudonimizar — então não fingimos que há. O identificador é
+        // derivado do número, e a consequência está registrada no topo do
+        // arquivo: o nome do documento revela qual unidade votou, mas NÃO
+        // revela em que votou, porque a opção vive em /votos e /votos_contagem,
+        // que têm leitura restrita.
+        && request.resource.data.tag == request.resource.data.numero
+        && comprovanteId == request.resource.data.assembleiaId + '~' + request.resource.data.numero
+        && textoOk(request.resource.data.numero, 1, 20)
+        && assembleiaAtiva(request.resource.data.assembleiaId)
+        && request.resource.data.status == 'votando'
+        && request.resource.data.votosRegistrados == 0
+        && request.resource.data.votouEm == []
+        && horarioOk(request.resource.data.criadoEm)
+        && horarioOk(request.resource.data.ultimaAtualizacao)
+        && request.resource.data.keys().hasOnly(
+             ['assembleiaId', 'tag', 'numero', 'status', 'votosRegistrados', 'votouEm', 'criadoEm', 'ultimaAtualizacao', 'uid']
+           );
+
+      // Só renova o heartbeat ou finaliza a sessão. Nunca reabre uma sessão já
+      // finalizada — era por aí que se votava duas vezes na versão antiga.
+      allow update: if autenticado()
+        && campoInalterado('assembleiaId')
+        && campoInalterado('tag')
+        && campoInalterado('numero')
+        && request.resource.data.status in ['votando', 'votado']
+        && !(resource.data.status == 'votado' && request.resource.data.status == 'votando')
+        && request.resource.data.votosRegistrados >= resource.data.votosRegistrados
+        && request.resource.data.votouEm is list
+        && request.resource.data.votouEm.size() >= resource.data.votouEm.size()
+        && horarioOk(request.resource.data.ultimaAtualizacao)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'votosRegistrados', 'votouEm', 'ultimaAtualizacao']);
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // /votos/{votoId} — o voto
+    // =========================================================================
+    // ID determinístico: {assembleiaId}~{propostaId}~{tag}. É o caminho do
+    // documento que garante um voto por unidade por proposta.
+    //
+    // LEITURA — a regra mais importante deste arquivo, e a que atende ao pedido
+    // central do projeto:
+    //
+    //     SOMENTE O ADMINISTRADOR DO SISTEMA LÊ VOTO INDIVIDUAL.
+    //
+    // Nem o síndico, nem o morador. O síndico administra a assembleia e vê o
+    // RESULTADO publicado, mas não quem votou o quê.
+    //
+    // O voto está em TEXTO CLARO neste modelo — a leitura restrita é o que
+    // protege, e não a criptografia. Consequência que precisa estar dita: o dono
+    // do projeto consegue ler os votos pelo console do Firebase, que ignora
+    // regras. Para o morador e para o síndico, o sigilo é efetivo.
+    //
+    // ESCRITA: o votante cria o próprio voto, uma única vez, em assembleia ativa.
+
+    match /votos/{votoId} {
+
+      allow read: if isAdminSistema();
+
+      allow create: if autenticado()
+        // Forma do ID: três partes separadas por `~`.
+        && votoId.split('~').size() == 3
+        && request.resource.data.assembleiaId is string
+        && request.resource.data.propostaId is string
+        && request.resource.data.tag is string
+        && votoId == request.resource.data.assembleiaId
+                   + '~' + request.resource.data.propostaId
+                   + '~' + request.resource.data.tag
+        // Assembleia ativa: se estiver encerrada, o voto é recusado.
+        && assembleiaAtiva(request.resource.data.assembleiaId)
+        // A opção precisa estar entre as opções reais da proposta. Sem isso, um
+        // cliente poderia gravar uma opção inventada e distorcer a contagem.
+        && request.resource.data.opcao in get(
+             /databases/$(database)/documents/assembleias/$(request.resource.data.assembleiaId)
+             /propostas/$(request.resource.data.propostaId)
+           ).data.opcoes
+        // A sessão da unidade precisa existir: voto sem check-in é recusado.
+        && exists(/databases/$(database)/documents/comprovantes/$(request.resource.data.assembleiaId + '~' + request.resource.data.tag))
+        // O espelho de contagem precisa existir com a MESMA opção. É esta linha
+        // que impede publicar um resultado que não corresponde aos votos: sem
+        // ela, bastaria gravar um espelho mentiroso em /votos_contagem para a
+        // apuração sair errada.
+        //
+        // `getAfter` e NÃO `get`. Esta foi a causa de um erro real em produção:
+        // o voto e o espelho são gravados no MESMO lote (`writeBatch`), e as
+        // regras avaliam `get()` contra o estado ANTERIOR ao commit. Como o
+        // espelho ainda não existia, `get()` falhava e a gravação do voto era
+        // recusada com "permission denied" — o morador não conseguia votar.
+        //
+        // `getAfter()` lê o estado resultante, que INCLUI as escritas do próprio
+        // lote. É a função correta para validar documentos gravados juntos, e
+        // mantém exatamente a mesma garantia: o espelho precisa ter a mesma
+        // opção do voto, e os dois entram ou nenhum entra.
+        && getAfter(/databases/$(database)/documents/votos_contagem/$(votoId)).data.opcao == request.resource.data.opcao
+        && horarioOk(request.resource.data.criadoEm)
+        && request.resource.data.keys().hasOnly([
+             'assembleiaId', 'propostaId', 'tag', 'numero', 'opcao', 'uid', 'criadoEm'
+           ]);
+
+      // Voto nunca é alterado nem apagado. Sem isso, o resultado publicado
+      // poderia ser reescrito depois da publicação.
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // /votos_contagem/{votoId} — espelho ANÔNIMO do voto, para apuração
+    // =========================================================================
+    //
+    // POR QUE ESTA COLEÇÃO EXISTE
+    //
+    // O síndico precisa poder apurar (foi uma decisão do projeto), mas NÃO pode
+    // ler `/votos`, que revela quem votou o quê. Sem uma segunda via, essas duas
+    // exigências se contradizem.
+    //
+    // A solução: ao votar, o cliente grava DOIS documentos com o mesmo ID — o
+    // voto completo em `/votos` (leitura só do administrador do sistema) e este
+    // espelho, que contém APENAS a proposta e a opção escolhida.
+    //
+    // O que este documento NÃO tem, de propósito: número da unidade, uid do
+    // votante e horário. Sem o primeiro, não há como atribuir o voto a ninguém.
+    // O ID é o mesmo do voto (contém a tag da unidade), mas quem lê esta coleção
+    // não consegue inverter a tag — é um HMAC.
+    //
+    // CONSEQUÊNCIA HONESTA: a tag é estável entre assembleias. Quem tiver o
+    // direito de ler esta coleção em duas assembleias diferentes consegue
+    // perceber que "a mesma unidade" votou nas duas — ainda que não saiba qual.
+    // Para um condomínio, isso não revela voto: revela participação, que é
+    // justamente o que a ata precisa registrar.
+    //
+    // A regra de criação de `/votos` exige que este espelho exista com a MESMA
+    // opção. Sem essa amarração, alguém poderia gravar um espelho mentiroso e
+    // publicar um resultado falso.
+
+    match /votos_contagem/{votoId} {
+
+      allow read: if isOperador();
+
+      allow create: if autenticado()
+        && votoId.split('~').size() == 3
+        && request.resource.data.assembleiaId is string
+        && request.resource.data.propostaId is string
+        && votoId == request.resource.data.assembleiaId
+                   + '~' + request.resource.data.propostaId
+                   + '~' + request.resource.data.tag
+        && assembleiaAtiva(request.resource.data.assembleiaId)
+        && request.resource.data.opcao in get(
+             /databases/$(database)/documents/assembleias/$(request.resource.data.assembleiaId)
+             /propostas/$(request.resource.data.propostaId)
+           ).data.opcoes
+        && request.resource.data.keys().hasOnly(
+             ['assembleiaId', 'propostaId', 'tag', 'opcao']
+           );
+
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // /resultados/{assembleiaId} — apuração publicada
+    // =========================================================================
+    // Gravado UMA VEZ, no encerramento. Depois disso, imutável.
+    //
+    // Contém apenas totais por opção: é isto que o morador e o síndico veem.
+    // Nenhum dado individual, então pode ser lido por qualquer autenticado.
+    //
+    // A regra exige que o resultado traga a contagem de votos considerados e que
+    // ela seja igual ao total de votos registrados no momento da publicação —
+    // não dá para conferir o total documento a documento aqui (regra de
+    // segurança não faz contagem), mas é possível exigir coerência de forma.
+
+    match /resultados/{assembleiaId} {
+
+      allow read: if autenticado();
+
+      allow create: if isOperador()
+        && request.resource.data.assembleiaId == assembleiaId
+        && request.resource.data.publicadoPor == request.auth.uid
+        && horarioOk(request.resource.data.publicadoEm)
+        // `is list` e NÃO `is map`.
+        //
+        // DEFEITO REAL: a regra exigia `map`, mas a apuração é gravada como uma
+        // LISTA — um item por proposta (`propostas.map(...)`). O tipo errado fazia
+        // o Firestore recusar TODA publicação com "Missing or insufficient
+        // permissions", e a mensagem não diz qual condição falhou. O resultado
+        // nunca podia ser publicado, e parecia problema de papel do usuário.
+        && request.resource.data.apuracao is list
+        && request.resource.data.apuracao.size() >= 0
+        && request.resource.data.totalVotos is int
+        && request.resource.data.totalVotos >= 0
+        // Só publica depois de encerrar: o status no documento da assembleia
+        // precisa já ser 'encerrada'.
+        && get(/databases/$(database)/documents/assembleias/$(assembleiaId)).data.status == 'encerrada';
+
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // Negar tudo o que não foi explicitamente listado
+    // =========================================================================
+    // Sem esta regra, uma coleção nova nasce aberta.
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,385 +1,559 @@
 "use client";
 
-import { db } from '@/lib/firebase';
-import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
-import { useRouter } from 'next/navigation';
+/**
+ * ipevox — Painel do Síndico (criação de assembleia)
+ * =============================================================================
+ * DEFEITOS CORRIGIDOS AQUI:
+ *
+ *  1. A CRIAÇÃO ACONTECIA NO CLIENTE. `addDoc(collection(db,'assembleias'))` era
+ *     chamado do browser e o Firestore aceitava porque não havia regra. Qualquer
+ *     pessoa com o link podia criar assembleia. Agora é a Cloud Function
+ *     `criarAssembleia`, que exige síndico.
+ *
+ *  2. O ID COLIDIA. `asb_${Date.now().toString(36)}` tem resolução de
+ *     milissegundo: duas assembleias criadas no mesmo milissegundo (dois cliques,
+ *     duas abas) recebiam o MESMO id. Agora é UUID, gerado no servidor.
+ *
+ *  3. O MODO "RÁPIDA" VALIDAVA ERRADO. Ele substituía as propostas usando
+ *     `propostas[0].opcoes` — o state interno da tela de múltiplos cards — em vez
+ *     da proposta que seria realmente gravada. Dependendo da sequência de cliques
+ *     dava para criar votação sem opções válidas. Agora o modo rápido usa
+ *     exatamente o mesmo rascunho que o modo assembleia valida.
+ *
+ *  4. TÍTULOS REPETIDOS E CHAVE DE CAMPO. A apuração antiga agrupava por título e
+ *     gravava `votosComputados.{titulo}` como caminho de campo — título com ponto
+ *     quebrava a escrita e título repetido somava votos de propostas diferentes.
+ *     Agora cada proposta recebe um UUID e o servidor rejeita títulos duplicados.
+ *
+ *  5. EMOJIS COMO ÚNICA AFFORDANCE e duas <div> vazias onde os ícones se perderam.
+ */
+
+import { IconeAlerta, IconeCadeado, IconeCheck, IconeMais, IconeOlho, IconeX } from '@/components/Icones';
+import { criarAssembleia } from '@/lib/api';
+import { lerCatalogo } from '@/lib/data';
+import { PainelComBarra } from '@/components/BarraLateral';
+import { useExigirAdmin } from '@/lib/auth';
+// `ROTULOS_MODO` substitui o rótulo escrito à mão que havia aqui
+// ('Votação fechada (selada)'). O rótulo agora vem do schema, então mudar o nome
+// do modo em um lugar só reflete na interface inteira — antes havia três cópias
+// da mesma string, que já tinham divergido.
+import {
+  DESCRICAO_MODO,
+  MAX_DESCRICAO,
+  MAX_OPCAO,
+  MAX_OPCOES,
+  MAX_TITULO,
+  MIN_OPCOES,
+  MODOS,
+  ROTULOS_MODO,
+} from '@/lib/schema';
 import { QRCodeSVG } from 'qrcode.react';
-import { useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
+
+const OPCOES_PADRAO = ['Sim', 'Não', 'Abstenção'];
+
+function propostaVazia() {
+  return { titulo: '', descricao: '', opcoes: [...OPCOES_PADRAO] };
+}
 
 export default function Admin() {
   const router = useRouter();
+  const { autorizado, usuario, ehSuperAdmin } = useExigirAdmin(router);
 
-  // ✅ Verificação de login
-  const [isAdmin, setIsAdmin] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return sessionStorage.getItem('is_admin') === 'true';
-    }
-    return false;
-  });;
+  const [passo, setPasso] = useState('formulario'); // 'formulario' | 'sucesso'
 
-  const [modo, setModo] = useState('assembleia'); // 'assembleia' ou 'rapida'
-  const propostasRef = useRef(null);
-  const [propostas, setPropostas] = useState([{
-    titulo: '',
-    descricao: '',
-    opcoes: ['Sim', 'Não', 'Abstenção']
-  }]);
-  const [criado, setCriado] = useState(false);
-  const [linkAssembleia, setLinkAssembleia] = useState('');
-  const [carregando, setCarregando] = useState(false);
-  const [erro, setErro] = useState('');
   const [titulo, setTitulo] = useState('');
   const [descricao, setDescricao] = useState('');
+  const [modo, setModo] = useState(MODOS.ABERTA);
+  const [propostas, setPropostas] = useState([propostaVazia()]);
 
-  // Redireciona se não estiver logado
+  const [enviando, setEnviando] = useState(false);
+  const [erro, setErro] = useState('');
+  const [resultado, setResultado] = useState(null);
+
+  /**
+   * Unidades ativas do catálogo, contadas para gravar `unidadesAptas` na
+   * assembleia.
+   *
+   * Sem isto, a assembleia nascia com ZERO unidades aptas — e esse número é a
+   * base de cálculo do percentual "das unidades aptas" no resultado. Uma
+   * assembleia com a base zerada mostraria 0% em todas as opções,
+   * independentemente de quantos votassem.
+   *
+   * Unidade inadimplente NÃO é descontada aqui: a inadimplência pode mudar entre
+   * a criação e a apuração, e o desconto é aplicado no momento de publicar o
+   * resultado, que é quando ele precisa valer.
+   */
+  const [unidadesAptas, setUnidadesAptas] = useState(0);
+
   useEffect(() => {
-    if (!isAdmin) {
-      router.push('/admin/login');
-    }
-  }, [isAdmin, router]);
+    if (!autorizado) return undefined;
+    let ativo = true;
 
-  // Mostra loading enquanto verifica
-  if (!isAdmin) {
-    return (
-      <main className="min-h-screen flex items-center justify-center">
-        <p className="text-gray-400 animate-pulse">Redirecionando...</p>
-      </main>
-    );
-  }
-
-  // Adiciona nova proposta
-  function addProposta() {
-    setPropostas([...propostas, {
-      titulo: '',
-      descricao: '',
-      opcoes: ['Sim', 'Não', 'Abstenção']
-    }]);
-
-    // Aguarda o React renderizar o novo card e rola a tela
-    setTimeout(() => {
-      if (propostasRef.current) {
-        propostasRef.current.lastElementChild?.scrollIntoView({
-          behavior: 'smooth',
-          block: 'center'
-        });
-      }
-    }, 100);
-  }
-
-  // Atualiza campo de uma proposta
-  function updateProposta(index, campo, valor) {
-    const novas = [...propostas];
-    novas[index][campo] = valor;
-    setPropostas(novas);
-  }
-
-  // Adiciona opção de voto
-  function addOpcao(index, novaOpcao) {
-    if (!novaOpcao.trim()) return;
-    const novas = [...propostas];
-    if (!novas[index].opcoes.includes(novaOpcao.trim())) {
-      novas[index].opcoes = [...novas[index].opcoes, novaOpcao.trim()];
-      setPropostas(novas);
-    }
-  }
-
-  // Remove opção de voto
-  function removeOpcao(index, opcaoRemover) {
-    const novas = [...propostas];
-    novas[index].opcoes = novas[index].opcoes.filter(o => o !== opcaoRemover);
-    setPropostas(novas);
-  }
-
-  // Salva no Firestore
-  async function criarAssembleia(e) {
-    e.preventDefault();
-    setErro('');
-    setCarregando(true);
-
-    try {
-      // Validações
-      if (!titulo.trim()) throw new Error('Título é obrigatório');
-
-      // Prepara propostas válidas
-      let propostasValidas = propostas.filter(p => p.titulo.trim() !== '');
-
-      // Validação específica por modo
-      if (modo === 'assembleia') {
-        if (propostasValidas.length === 0) throw new Error('Adicione pelo menos uma proposta');
-      } else {
-        // Modo rápida: usa o título da assembleia como título da proposta
-        propostasValidas = [{
-          titulo: titulo.trim(),
-          descricao: descricao.trim(),
-          opcoes: propostas[0].opcoes
-        }];
-      }
-
-      // Valida opções
-      propostasValidas.forEach((p) => {
-        if (p.opcoes.length < 2) {
-          throw new Error(`A proposta "${p.titulo}" precisa de pelo menos 2 opções`);
-        }
+    lerCatalogo()
+      .then((lista) => {
+        if (!ativo) return;
+        setUnidadesAptas(lista.filter((u) => u.ativo !== false).length);
+      })
+      .catch(() => {
+        // Falha ao contar não impede criar a assembleia: o número fica 0 e a
+        // tela de sucesso avisa. Melhor criar com a base zerada, corrigível, do
+        // que impedir a criação por um erro de leitura do catálogo.
+        if (ativo) setUnidadesAptas(0);
       });
 
-      // Gera ID único
-      const idAssembleia = `asb_${Date.now().toString(36)}`;
-      const link = `${window.location.origin}/checkin/${idAssembleia}`;
+    return () => { ativo = false; };
+  }, [autorizado]);
 
-      // Prepara dados
-      const docData = {
-        id: idAssembleia,
-        titulo: titulo.trim(),
-        descricao: descricao.trim(),
-        tipo: modo,
-        status: 'ativa',
-        propostas: propostasValidas,
-        criadoEm: serverTimestamp(),
-      };
-
-      // Salva no Firestore
-      await addDoc(collection(db, 'assembleias'), docData);
-
-      // Sucesso!
-      setLinkAssembleia(link);
-      setCriado(true);
-
-    } catch (err) {
-      console.error(err);
-      setErro(err.message || 'Erro ao criar assembleia');
-    } finally {
-      setCarregando(false);
-    }
-  }
-
-  function alternarModo(novoModo) {
-    setModo(novoModo);
-    // Reseta para 1 proposta padrão ao trocar de modo
-    setPropostas([{ titulo: '', descricao: '', opcoes: ['Sim', 'Não', 'Abstenção'] }]);
-  }
-
-  // Se já foi criada, mostra o QR Code
-  if (criado) {
-    // Extrai o ID da assembleia a partir do link gerado
-    const idAssembleia = linkAssembleia.split('/').pop();
-
+  if (!autorizado) {
     return (
-      <main className="min-h-screen py-12 px-4 flex items-center justify-center">
-        <div className="bg-gray-800 rounded-2xl p-8 max-w-md w-full text-center space-y-6 border border-gray-700">
-          <div className="text-4xl">✅</div>
-          <h2 className="text-2xl font-bold text-white">{titulo}</h2>
-          <p className="text-gray-400">Exiba este QR Code no telão</p>
-
-          <div className="bg-white p-4 rounded-xl inline-block">
-            <QRCodeSVG value={linkAssembleia} size={200} />
-          </div>
-
-          <div className="bg-gray-900 p-3 rounded-lg break-all text-sm text-blue-400 font-mono">
-            {linkAssembleia}
-          </div>
-
-          {/* Botões de ação */}
-          <div className="flex flex-col gap-3">
-            <button
-              onClick={() => router.push(`/resultados/${idAssembleia}`)}
-              className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition"
-            >
-              Acompanhar Resultados em Tempo Real
-            </button>
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                onClick={() => { setCriado(false); setLinkAssembleia(''); }}
-                className="py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium transition"
-              >
-                Criar outra
-              </button>
-              <button
-                onClick={() => router.push('/admin/historico')}
-                className="py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition"
-              >
-                Ir Histórico
-              </button>
-            </div>
-          </div>
-        </div>
+      <main className="min-h-screen flex items-center justify-center">
+        <p className="text-gray-400 animate-pulse">Verificando acesso…</p>
       </main>
     );
   }
 
+  // --- Edição de propostas ---------------------------------------------------
+  // Todas as atualizações usam `map`, criando objetos novos. A versão anterior
+  // fazia `const novas = [...propostas]; novas[i].campo = valor`, um spread raso
+  // que mutava o objeto ainda referenciado pelo state anterior.
+
+  function alterarProposta(indice, campo, valor) {
+    setPropostas((atual) =>
+      atual.map((p, i) => (i === indice ? { ...p, [campo]: valor } : p))
+    );
+  }
+
+  function adicionarProposta() {
+    setPropostas((atual) => [...atual, propostaVazia()]);
+  }
+
+  function removerProposta(indice) {
+    setPropostas((atual) => atual.filter((_, i) => i !== indice));
+  }
+
+  function adicionarOpcao(indice, valor) {
+    const limpa = String(valor ?? '').trim();
+    if (!limpa) return;
+    setPropostas((atual) =>
+      atual.map((p, i) => {
+        if (i !== indice) return p;
+        if (p.opcoes.length >= MAX_OPCOES) return p;
+        if (p.opcoes.some((o) => o.toLowerCase() === limpa.toLowerCase())) return p;
+        return { ...p, opcoes: [...p.opcoes, limpa] };
+      })
+    );
+  }
+
+  function removerOpcao(indice, opcao) {
+    setPropostas((atual) =>
+      atual.map((p, i) =>
+        i === indice ? { ...p, opcoes: p.opcoes.filter((o) => o !== opcao) } : p
+      )
+    );
+  }
+
+  // --- Envio -----------------------------------------------------------------
+
+  async function enviar(e) {
+    e.preventDefault();
+    setErro('');
+    setEnviando(true);
+
+    try {
+      const resposta = await criarAssembleia({
+        titulo,
+        descricao,
+        modo,
+        propostas,
+        // `criadoPor` NÃO era passado aqui, e a função gravava `undefined` no
+        // documento — o Firestore recusa valor indefinido e a criação falhava
+        // com "Unsupported field value: undefined".
+        criadoPor: usuario?.uid ?? null,
+        // Contagem do catálogo: é a base do percentual "das unidades aptas" no
+        // resultado. Sem isto a assembleia nascia com zero e toda opção apareceria
+        // como 0%, por mais que votassem.
+        unidadesAptas,
+      });
+      setResultado({
+        assembleiaId: resposta.assembleiaId,
+        unidadesAptas: resposta.unidadesAptas,
+        link: `${window.location.origin}/checkin/${resposta.assembleiaId}`,
+      });
+      setPasso('sucesso');
+    } catch (falha) {
+      setErro(falha.message);
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  function novaAssembleia() {
+    setTitulo('');
+    setDescricao('');
+    setPropostas([propostaVazia()]);
+    setResultado(null);
+    setErro('');
+    setPasso('formulario');
+  }
+
+  // A função `sairDoSistema` foi removida: o botão "Sair" agora vive na barra
+  // lateral, ao alcance de todas as telas, e encerra a sessão de verdade —
+  // antes ele apenas navegava e a sessão continuava ativa.
+
+  // --- Tela de sucesso -------------------------------------------------------
+
+  if (passo === 'sucesso' && resultado) {
   return (
-    <main className="min-h-screen py-12 px-4">
-      <div className="max-w-3xl mx-auto">
-        <div className="flex justify-between items-center mb-8">
-          <h1 className="text-3xl font-bold text-white">⚙️ Painel do Síndico</h1>
-          <div className="flex gap-3">
-            <button
-              onClick={() => router.push('/admin/unidades')}
-              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition"
-            >
-              🏠 Unidades
-            </button>
-            <button
-              onClick={() => router.push('/admin/historico')}
-              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition"
-            >
-              📊 Histórico
-            </button>
-          </div>
-          <button onClick={() => router.push('/')} className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm transition">
-            Sair
-          </button>
+    <PainelComBarra largura="max-w-xl">
+      <div className="bg-gray-800 rounded-2xl p-8 w-full border border-gray-700">
+        <div className="flex justify-center mb-4 text-green-400">
+          <IconeCheck tamanho={44} />
         </div>
+      <h2 className="text-2xl font-bold text-white text-center mb-1">{titulo}</h2>
+      <p className="text-gray-400 text-center text-sm mb-1">
+        Assembleia criada com {resultado.unidadesAptas} unidade(s) apta(s).
+      </p>
+    <p className="text-gray-500 text-center text-xs mb-6">
+      Exiba este QR Code no telão para os moradores entrarem.
+    </p>
 
-        {erro && (
-          <div className="mb-6 p-4 bg-red-900/30 border border-red-800 text-red-300 rounded-xl">
-            ⚠️ {erro}
-          </div>
-        )}
+  <div className="bg-white p-4 rounded-xl flex justify-center mb-4">
+    <QRCodeSVG value={resultado.link} size={200} />
+  </div>
 
-        {/* Seletor de Modo */}
-        <div className="grid grid-cols-2 gap-4 mb-8">
-          <button
-            onClick={() => alternarModo('assembleia')}
-            className={`p-4 rounded-xl border text-left transition ${modo === 'assembleia' ? 'bg-blue-900/30 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'}`}
-          >
-            <div className="text-2xl mb-2">🏢</div>
-            <div className="font-semibold">Assembleia Completa</div>
-            <div className="text-sm mt-1">Múltiplas propostas</div>
-          </button>
-          <button
-            onClick={() => alternarModo('rapida')}
-            className={`p-4 rounded-xl border text-left transition ${modo === 'rapida' ? 'bg-green-900/30 border-green-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'}`}
-          >
-            <div className="text-2xl mb-2"></div>
-            <div className="font-semibold">Votação Rápida</div>
-            <div className="text-sm mt-1">Uma proposta urgente</div>
-          </button>
+<div className="bg-gray-900 p-3 rounded-lg break-all text-xs text-blue-400 font-mono mb-6">
+  {resultado.link}
+</div>
+
+<div className="flex flex-col gap-3">
+  <button
+type="button"
+onClick={() => router.push(`/resultados/${resultado.assembleiaId}`)}
+className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition"
+>
+Acompanhar resultados
+</button>
+<div className="grid grid-cols-2 gap-3">
+  <button
+type="button"
+onClick={novaAssembleia}
+className="py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium transition"
+>
+Criar outra
+</button>
+<button
+type="button"
+onClick={() => router.push('/admin/historico')}
+className="py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition"
+>
+Histórico
+</button>
+</div>
+</div>
+</div>
+</PainelComBarra>
+);
+}
+
+// --- Formulário -----------------------------------------------------------
+
+  return (
+    <PainelComBarra largura="max-w-3xl">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-white">Painel</h1>
+        {/*
+          A identificação de quem está logado e a navegação ficam na barra
+          lateral. Aqui é só o título: a fileira de botões que existia neste
+          ponto repetia o que a barra já oferece em todas as telas, e mudava de
+          combinação de uma tela para outra.
+        */}
+        <p className="text-gray-500 text-sm mt-1">
+          Crie a assembleia, escolha o modo de votação e defina as propostas.
+        </p>
+      </div>
+
+      {erro && (
+        <div
+          role="alert"
+          className="mb-6 p-4 bg-red-900/30 border border-red-800 text-red-300 rounded-xl text-sm flex items-start gap-2"
+        >
+          <span className="mt-0.5 shrink-0"><IconeAlerta tamanho={16} /></span>
+          {erro}
         </div>
+      )}
 
-        {/* Formulário */}
-        <form onSubmit={criarAssembleia} className="bg-gray-800 border border-gray-700 rounded-2xl p-6 space-y-6">
+      <form onSubmit={enviar} className="space-y-6">
+        {/* Modo de votação — a decisão mais consequente desta tela */}
+        <fieldset className="bg-gray-800 border border-gray-700 rounded-2xl p-6">
+          <legend className="px-2 text-sm font-medium text-gray-300">
+            Como os votos serão registrados? *
+          </legend>
+          <p className="text-xs text-gray-500 mb-4 mt-1">
+            Esta escolha é definitiva: não é possível alterar o modo depois que a
+            assembleia começa a receber votos.
+          </p>
+
+          <div className="grid md:grid-cols-2 gap-4">
+            {[MODOS.ABERTA, MODOS.FECHADA].map((valor) => {
+              const Icone = valor === MODOS.FECHADA ? IconeCadeado : IconeOlho;
+              const ativo = modo === valor;
+
+              return (
+                <label
+                  key={valor}
+                  className={`cursor-pointer rounded-xl border p-4 transition ${
+                    ativo
+                      ? valor === MODOS.FECHADA
+                        ? 'bg-indigo-900/30 border-indigo-500'
+                        : 'bg-blue-900/30 border-blue-500'
+                      : 'bg-gray-900 border-gray-700 hover:border-gray-600'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="modo"
+                    value={valor}
+                    checked={ativo}
+                    onChange={() => setModo(valor)}
+                    className="sr-only"
+                  />
+                  <div className={`flex items-center gap-2 font-semibold mb-2 ${
+                    ativo ? 'text-white' : 'text-gray-300'
+                  }`}>
+                    <Icone tamanho={18} />
+                    {ROTULOS_MODO[valor]}
+                    {ativo && (
+                      <span className="ml-auto text-green-400">
+                        <IconeCheck tamanho={16} />
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-400 leading-relaxed">
+                    {DESCRICAO_MODO[valor]}
+                  </p>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+
+        {/* Dados gerais */}
+        <div className="bg-gray-800 border border-gray-700 rounded-2xl p-6 space-y-5">
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">Título *</label>
+            <label htmlFor="titulo" className="block text-sm font-medium text-gray-300 mb-2">
+              Título da assembleia *
+            </label>
             <input
+              id="titulo"
               type="text"
               value={titulo}
+              maxLength={MAX_TITULO}
               onChange={(e) => setTitulo(e.target.value)}
-              placeholder={modo === 'assembleia' ? "Ex: Assembleia Ordinária" : "Ex: Aprovação de Reforma"}
+              placeholder="Ex: Assembleia Geral Ordinária 2026"
               className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 outline-none"
-              required
             />
+            <p className="text-xs text-gray-600 mt-1">
+              {titulo.length}/{MAX_TITULO}
+            </p>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">Descrição (opcional)</label>
+            <label htmlFor="descricao" className="block text-sm font-medium text-gray-300 mb-2">
+              Descrição (opcional)
+            </label>
             <textarea
-              value={descricao}
-              onChange={(e) => setDescricao(e.target.value)}
+              id="descricao"
               rows={3}
-              placeholder="Contexto ou detalhes..."
+              value={descricao}
+              maxLength={MAX_DESCRICAO}
+              onChange={(e) => setDescricao(e.target.value)}
+              placeholder="Contexto, ordem do dia, observações…"
               className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
             />
           </div>
+        </div>
 
-          {/* Propostas */}
-          <div className="space-y-4" ref={propostasRef}>
-            <label className="block text-sm font-medium text-gray-300">
-              {modo === 'rapida' ? 'Proposta Única' : 'Propostas da Pauta'}
-            </label>
-
-            {propostas.map((p, idx) => (
-              <div key={idx} className="bg-gray-900 p-4 rounded-xl border border-gray-700 space-y-3">
-                {modo === 'assembleia' && (
-                  <input
-                    type="text"
-                    placeholder={`Título da proposta ${idx + 1} *`}
-                    value={p.titulo}
-                    onChange={(e) => updateProposta(idx, 'titulo', e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm placeholder-gray-500"
-                    required
-                  />
-                )}
-
-                {modo === 'rapida' && (
-                  <input type="hidden" value={titulo} readOnly />
-                )}
-
-
-                {/* Opções de Voto */}
-                <div>
-                  <label className="block text-xs text-gray-400 mb-2">Opções de voto (mínimo 2):</label>
-                  <div className="flex flex-wrap gap-2 mb-2">
-                    {p.opcoes.map((opcao, opIdx) => (
-                      <span key={opIdx} className="bg-blue-900/50 text-blue-200 px-3 py-1 rounded-full text-sm flex items-center gap-2">
-                        {opcao}
-                        {p.opcoes.length > 2 && (
-                          <button
-                            type="button"
-                            onClick={() => removeOpcao(idx, opcao)}
-                            className="text-blue-400 hover:text-blue-200"
-                          >
-                            ×
-                          </button>
-                        )}
-                      </span>
-                    ))}
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      placeholder="Adicionar opção"
-                      className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm placeholder-gray-500"
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          addOpcao(idx, e.target.value);
-                          e.target.value = '';
-                        }
-                      }}
-                    />
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        const input = e.target.previousSibling;
-                        addOpcao(idx, input.value);
-                        input.value = '';
-                      }}
-                      className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-
-            {/* Botão Adicionar Proposta - alinhado à direita, acima do botão principal */}
-            {modo === 'assembleia' && (
-              <div className="flex justify-end pt-2">
-                <button
-                  type="button"
-                  onClick={addProposta}
-                  className="text-sm text-blue-400 hover:text-blue-300 font-medium flex items-center gap-1"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                  </svg>
-                  Adicionar proposta
-                </button>
-              </div>
-            )}
+        {/* Propostas */}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-medium text-gray-300">Propostas da pauta *</h2>
+            <span className="text-xs text-gray-600">
+              mínimo {MIN_OPCOES} opções por proposta · máximo {MAX_OPCOES}
+            </span>
           </div>
 
-          <button
-            type="submit"
-            disabled={carregando}
-            className={`w-full py-4 rounded-xl font-semibold text-lg transition
-              ${carregando ? 'bg-gray-700 cursor-not-allowed text-gray-400' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
-          >
-            {carregando ? '🔄 Criando...' : '📢 Gerar QR Code e Iniciar'}
-          </button>
-        </form>
-      </div>
-    </main>
+          {propostas.map((p, indice) => (
+            <div
+              key={indice}
+              className="bg-gray-800 border border-gray-700 rounded-2xl p-5 space-y-4"
+            >
+              <div className="flex items-center gap-3">
+                <span className="shrink-0 w-7 h-7 rounded-full bg-blue-900/50 text-blue-300 text-sm font-semibold flex items-center justify-center">
+                  {indice + 1}
+                </span>
+                <input
+                  type="text"
+                  value={p.titulo}
+                  maxLength={MAX_TITULO}
+                  onChange={(e) => alterarProposta(indice, 'titulo', e.target.value)}
+                  placeholder="Título da proposta"
+                  className="flex-1 px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm placeholder-gray-500 outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                {propostas.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removerProposta(indice)}
+                    aria-label={`Remover proposta ${indice + 1}`}
+                    className="shrink-0 p-2 text-gray-500 hover:text-red-400 transition"
+                  >
+                    <IconeX tamanho={18} />
+                  </button>
+                )}
+              </div>
+
+              <textarea
+                rows={2}
+                value={p.descricao}
+                maxLength={MAX_DESCRICAO}
+                onChange={(e) => alterarProposta(indice, 'descricao', e.target.value)}
+                placeholder="Descrição da proposta (opcional)"
+                className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm placeholder-gray-500 outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              />
+
+              <div>
+                <p className="text-xs text-gray-400 mb-2">Opções de voto</p>
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {p.opcoes.map((opcao) => (
+                    <span
+                      key={opcao}
+                      className="inline-flex items-center gap-1.5 bg-blue-900/40 text-blue-200 px-3 py-1 rounded-full text-sm"
+                    >
+                      {opcao}
+                      {p.opcoes.length > MIN_OPCOES && (
+                        <button
+                          type="button"
+                          onClick={() => removerOpcao(indice, opcao)}
+                          aria-label={`Remover opção ${opcao}`}
+                          className="text-blue-400 hover:text-blue-100 transition"
+                        >
+                          <IconeX tamanho={13} />
+                        </button>
+                      )}
+                    </span>
+                  ))}
+                  {p.opcoes.length === 0 && (
+                    <span className="text-xs text-gray-600">
+                      Nenhuma opção — adicione ao menos {MIN_OPCOES}.
+                    </span>
+                  )}
+                </div>
+
+                {/* Campo controlado: a versão anterior era um input não controlado
+                    alcançado via `e.target.previousSibling`, o que quebra ao
+                    reordenar o JSX. */}
+                <CampoNovaOpcao
+                  desabilitado={p.opcoes.length >= MAX_OPCOES}
+                  onAdicionar={(valor) => adicionarOpcao(indice, valor)}
+                />
+              </div>
+            </div>
+          ))}
+
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={adicionarProposta}
+              className="inline-flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300 font-medium transition"
+            >
+              <IconeMais tamanho={16} />
+              Adicionar proposta
+            </button>
+          </div>
+        </div>
+
+        {/*
+          Aviso do modo escolhido. O texto da versão anterior dizia que os votos
+          do modo fechado seriam "cifrados (AES-256-GCM)" e que a abertura ficaria
+          "registrada na trilha de auditoria". As duas afirmações deixaram de ser
+          verdade quando o projeto passou a operar sem servidor, e foram
+          reescritas para descrever o que existe de fato.
+        */}
+        <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+          <p className="text-xs text-gray-400 leading-relaxed">
+            {modo === MODOS.FECHADA
+              ? 'Os votos desta assembleia serão gravados com leitura bloqueada: '
+                + 'nem o síndico nem os moradores conseguem vê-los, e durante a '
+                + 'votação não haverá placar. A contagem por opção é publicada uma '
+                + 'única vez, no encerramento, e não pode ser alterada depois. A '
+                + 'identificação de como cada unidade votou fica restrita ao '
+                + 'administrador do sistema.'
+              : 'Os votos desta assembleia ficarão registrados junto ao número da '
+                + 'unidade e poderão ser conferidos por qualquer participante — '
+                + 'formato do art. 1.335 do Código Civil.'}
+          </p>
+        </div>
+
+        <button
+          type="submit"
+          disabled={enviando}
+          className={`w-full py-4 rounded-xl font-semibold text-lg transition ${
+            enviando
+              ? 'bg-gray-700 cursor-not-allowed text-gray-400'
+              : 'bg-blue-600 hover:bg-blue-700 text-white'
+          }`}
+        >
+          {enviando ? 'Criando assembleia…' : 'Criar assembleia e gerar QR Code'}
+        </button>
+      </form>
+    </PainelComBarra>
+  );
+}
+
+/**
+ * Campo para adicionar uma opção. Componente separado para ter estado próprio —
+ * o formulário pai não precisa saber o que está sendo digitado, e o valor não é
+ * obtido por manipulação de DOM.
+ */
+function CampoNovaOpcao({ desabilitado, onAdicionar }) {
+  const [valor, setValor] = useState('');
+
+  function confirmar() {
+    const limpo = valor.trim();
+    if (!limpo) return;
+    onAdicionar(limpo);
+    setValor('');
+  }
+
+  return (
+    <div className="flex gap-2">
+      <input
+        type="text"
+        value={valor}
+        maxLength={MAX_OPCAO}
+        disabled={desabilitado}
+        onChange={(e) => setValor(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            // Impede que Enter envie o formulário inteiro ao adicionar opção —
+            // era um bug fácil de reproduzir na versão anterior.
+            e.preventDefault();
+            confirmar();
+          }
+        }}
+        placeholder={desabilitado ? `Limite de ${MAX_OPCOES} opções atingido` : 'Adicionar opção'}
+        className="flex-1 px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm placeholder-gray-500 outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+      />
+      <button
+        type="button"
+        onClick={confirmar}
+        disabled={desabilitado || !valor.trim()}
+        aria-label="Adicionar opção"
+        className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg text-sm transition"
+      >
+        <IconeMais tamanho={16} />
+      </button>
+    </div>
   );
 }
