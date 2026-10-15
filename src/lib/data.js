@@ -188,6 +188,9 @@ export async function contarVotos(assembleiaId) {
  * Só o administrador do sistema consegue ler isto: a regra de `/votos` nega para
  * todo o resto, inclusive para o síndico. Usado apenas na tela de auditoria.
  */
+/**
+ * Votos individuais — leitura pontual.
+ */
 export async function lerVotosIndividuais(assembleiaId) {
   const snap = await getDocs(
     query(collection(obterDb(), COLECOES.VOTOS), where('assembleiaId', '==', assembleiaId))
@@ -199,15 +202,177 @@ export async function lerVotosIndividuais(assembleiaId) {
 }
 
 /**
- * Monta a apuração para exibição a partir do resultado PUBLICADO.
- *
- * Enquanto não houver resultado, devolve `publicado: false` — é assim que a tela
- * distingue "ainda não apurado" de "apurado com zero votos". Essa distinção
- * importa: a primeira diz "clique em publicar", a segunda diz "ninguém votou".
- *
- * Os campos de inadimplência viajam junto porque a ata precisa deles: sem
- * `votosExcluidos` e `unidadesInadimplentes`, o número publicado não bate com o
- * de unidades que votaram, e a diferença fica sem explicação para quem lê.
+ * Escuta os votos individuais em tempo real.
+ */
+export function escutarVotos(assembleiaId, aoAtualizar, aoFalhar) {
+  return onSnapshot(
+    query(collection(obterDb(), COLECOES.VOTOS), where('assembleiaId', '==', assembleiaId)),
+    (snap) => {
+      const lista = snap.docs
+        .map((d) => ({ votoId: d.id, ...d.data() }))
+        .sort((a, b) => compararNumeroUnidade(a.numero, b.numero));
+      aoAtualizar(lista);
+    },
+    (erro) => aoFalhar?.(erro)
+  );
+}
+
+/**
+ * Escuta o catálogo de unidades em tempo real.
+ */
+export function escutarCatalogoUnidades(aoAtualizar, aoFalhar) {
+  return onSnapshot(
+    collection(obterDb(), COLECOES.CATALOGO_UNIDADES),
+    (snap) => {
+      const lista = snap.docs
+        .map((d) => ({ docId: d.id, ...d.data() }))
+        .sort((a, b) => compararNumeroUnidade(a.numero, b.numero));
+      aoAtualizar(lista);
+    },
+    (erro) => aoFalhar?.(erro)
+  );
+}
+
+/**
+ * Monta a apuração em tempo real ou a partir do resultado publicado,
+ * incluindo o agrupamento de votos por unidade para assembleias abertas.
+ */
+export function montarApuracaoAoVivo({
+  assembleia,
+  propostas = [],
+  votos = [],
+  catalogo = [],
+  resultado = null,
+  participacao = null,
+}) {
+  const inadimplentesSet = new Set(
+    catalogo
+      .filter((u) => u.inadimplente === true)
+      .map((u) => String(u.numero ?? '').trim().toUpperCase().replace(/^0+(?=\d)/, ''))
+      .filter(Boolean)
+  );
+
+  const unidadesNoCatalogo = catalogo.length;
+  const unidadesAptasCadastro = assembleia?.unidadesAptas || unidadesNoCatalogo || 0;
+  const unidadesAptasParaDeliberar = Math.max(0, unidadesAptasCadastro - inadimplentesSet.size);
+
+  // Unidades que já votaram (pelo menos um voto registrado)
+  const unidadesQueVotaramSet = new Set(
+    votos.map((v) => String(v.numero ?? v.tag ?? '').trim().toUpperCase().replace(/^0+(?=\d)/, '')).filter(Boolean)
+  );
+  const totalUnidadesVotaram = Math.max(
+    participacao?.unidadesQueVotaram ?? 0,
+    unidadesQueVotaramSet.size
+  );
+
+  let totalVotosConsideradosGeral = 0;
+  let totalVotosExcluidosGeral = 0;
+
+  const propostasProcessadas = propostas.map((prop, idx) => {
+    const propId = prop.id || prop.propostaId;
+    const votosDestaProp = votos.filter((v) => v.propostaId === propId);
+
+    const contagens = {};
+    const unidadesPorOpcao = {};
+    (prop.opcoes ?? []).forEach((op) => {
+      contagens[op] = 0;
+      unidadesPorOpcao[op] = [];
+    });
+
+    const votosPorUnidade = [];
+    votosDestaProp.forEach((v) => {
+      const numNorm = String(v.numero ?? v.tag ?? '').trim().toUpperCase().replace(/^0+(?=\d)/, '');
+      const isInadimplente = inadimplentesSet.has(numNorm);
+
+      votosPorUnidade.push({
+        votoId: v.votoId || v.id,
+        numero: v.numero || v.tag,
+        opcao: v.opcao,
+        criadoEm: v.criadoEm || null,
+        inadimplente: isInadimplente,
+      });
+
+      if (isInadimplente) {
+        totalVotosExcluidosGeral += 1;
+        return;
+      }
+
+      if (prop.opcoes?.includes(v.opcao)) {
+        contagens[v.opcao] = (contagens[v.opcao] || 0) + 1;
+        unidadesPorOpcao[v.opcao].push(v.numero || v.tag);
+        totalVotosConsideradosGeral += 1;
+      }
+    });
+
+    votosPorUnidade.sort((a, b) => compararNumeroUnidade(a.numero, b.numero));
+
+    // Se houver resultado congelado para esta proposta, podemos respeitar seus números
+    const propNoResultado = resultado?.apuracao?.find?.((p) => (p.propostaId || p.id) === propId);
+
+    const opcoesComEstatisticas = (prop.opcoes ?? []).map((opcao) => {
+      const votosOpcao = propNoResultado
+        ? (propNoResultado.opcoes?.find((o) => o.opcao === opcao)?.votos ?? contagens[opcao] ?? 0)
+        : (contagens[opcao] ?? 0);
+
+      const totalVotosProp = propNoResultado
+        ? propNoResultado.totalVotos
+        : Object.values(contagens).reduce((s, c) => s + c, 0);
+
+      const percentual = totalVotosProp > 0 ? Math.round((votosOpcao / totalVotosProp) * 100) : 0;
+      const percentualAptas = unidadesAptasParaDeliberar > 0
+        ? Math.round((votosOpcao / unidadesAptasParaDeliberar) * 100)
+        : 0;
+
+      const unidades = [...(unidadesPorOpcao[opcao] || [])].sort(compararNumeroUnidade);
+
+      return {
+        opcao,
+        votos: votosOpcao,
+        percentual,
+        percentualAptas,
+        unidades,
+      };
+    });
+
+    const totalVotos = propNoResultado
+      ? propNoResultado.totalVotos
+      : opcoesComEstatisticas.reduce((acc, o) => acc + o.votos, 0);
+
+    const maxVotos = Math.max(0, ...opcoesComEstatisticas.map((o) => o.votos));
+    const maisVotadas = maxVotos > 0 ? opcoesComEstatisticas.filter((o) => o.votos === maxVotos) : [];
+    const empate = maisVotadas.length > 1;
+    const aprovada = maisVotadas.length === 1 ? maisVotadas[0] : null;
+
+    return {
+      propostaId: propId,
+      titulo: prop.titulo || `Proposta ${idx + 1}`,
+      descricao: prop.descricao || '',
+      ordem: prop.ordem ?? idx + 1,
+      totalVotos,
+      opcoes: opcoesComEstatisticas,
+      empate,
+      aprovada,
+      maisVotadas: maisVotadas.map((m) => m.opcao),
+      votosPorUnidade,
+      totalVotantes: votosDestaProp.length,
+    };
+  });
+
+  return {
+    propostas: propostasProcessadas,
+    totalParticipacoes: resultado?.totalVotos ?? totalVotosConsideradosGeral,
+    votosExcluidos: resultado?.votosExcluidos ?? totalVotosExcluidosGeral,
+    unidadesQueVotaram: totalUnidadesVotaram,
+    unidadesAptas: resultado?.unidadesAptas ?? unidadesAptasParaDeliberar,
+    unidadesAptasCadastro: resultado?.unidadesAptasCadastro ?? unidadesAptasCadastro,
+    unidadesInadimplentes: resultado?.unidadesInadimplentes ?? inadimplentesSet.size,
+    publicado: Boolean(resultado?.apuracao),
+    emTempoReal: !resultado?.apuracao,
+  };
+}
+
+/**
+ * Monta a apuração para exibição a partir do resultado PUBLICADO (mantido por compatibilidade).
  */
 export function montarApuracaoDeResultado({ resultado, unidadesAptas, participacao }) {
   if (!resultado?.apuracao) {

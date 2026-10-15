@@ -151,6 +151,21 @@ service cloud.firestore {
               && getAfter(/databases/$(database)/documents/assembleias/$(assembleiaId)).data.status == 'ativa');
     }
 
+    /**
+     * Modo da assembleia (`aberta` ou `fechada`).
+     *
+     * Decide quem pode ler o voto individual: na votação ABERTA o voto é
+     * atribuível por desenho, então qualquer participante autenticado acompanha;
+     * na RESTRITA o voto individual é sigiloso e só o administrador do sistema lê.
+     *
+     * Numa consulta, todos os votos trazem o MESMO `assembleiaId`, então o `get()`
+     * aponta sempre para o mesmo documento e é cacheado — conta uma única vez
+     * contra o limite de acessos por requisição.
+     */
+    function modoDaAssembleia(assembleiaId) {
+      return get(/databases/$(database)/documents/assembleias/$(assembleiaId)).data.modo;
+    }
+
     function campoInalterado(campo) {
       return !(campo in request.resource.data.diff(resource.data).affectedKeys());
     }
@@ -331,24 +346,24 @@ service cloud.firestore {
     // ID determinístico: {assembleiaId}~{propostaId}~{tag}. É o caminho do
     // documento que garante um voto por unidade por proposta.
     //
-    // LEITURA — a regra mais importante deste arquivo, e a que atende ao pedido
-    // central do projeto:
+    // LEITURA — depende do MODO da assembleia:
     //
-    //     SOMENTE O ADMINISTRADOR DO SISTEMA LÊ VOTO INDIVIDUAL.
-    //
-    // Nem o síndico, nem o morador. O síndico administra a assembleia e vê o
-    // RESULTADO publicado, mas não quem votou o quê.
+    //   - VOTAÇÃO RESTRITA (fechada): SOMENTE O ADMINISTRADOR DO SISTEMA lê o
+    //     voto individual. Nem o síndico, nem o morador. O síndico administra a
+    //     assembleia e vê o RESULTADO publicado, mas não quem votou o quê.
+    //   - VOTAÇÃO ABERTA: o voto é atribuível por desenho (a página de resultados
+    //     mostra a opção de cada casa em tempo real), então qualquer participante
+    //     autenticado pode acompanhar.
     //
     // O voto está em TEXTO CLARO neste modelo — a leitura restrita é o que
     // protege, e não a criptografia. Consequência que precisa estar dita: o dono
     // do projeto consegue ler os votos pelo console do Firebase, que ignora
     // regras. Para o morador e para o síndico, o sigilo é efetivo.
-    //
-    // ESCRITA: o votante cria o próprio voto, uma única vez, em assembleia ativa.
 
     match /votos/{votoId} {
 
-      allow read: if isAdminSistema();
+      allow read: if isAdminSistema()
+        || (autenticado() && modoDaAssembleia(resource.data.assembleiaId) == 'aberta');
 
       allow create: if autenticado()
         // Forma do ID: três partes separadas por `~`.

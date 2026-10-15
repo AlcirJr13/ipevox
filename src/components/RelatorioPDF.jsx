@@ -238,6 +238,19 @@ const RelatorioPDF = ({ snapshot }) => {
 
   const propostas = ordenarPropostas(apuracao.propostas);
 
+  // O snapshot não traz `votosSelados`/`votosAbertos`; derivamos do modo:
+  // votação aberta (voto atribuível) = votos abertos; restrita = votos selados.
+  const votosRegistrados = formatarNumero(dados.totalVotos, 0);
+  const votacaoAberta = dados.modo === 'aberta';
+  const votosSelados = formatarNumero(
+    dados.votosSelados,
+    votacaoAberta ? 0 : votosRegistrados,
+  );
+  const votosAbertos = formatarNumero(
+    dados.votosAbertos,
+    votacaoAberta ? votosRegistrados : 0,
+  );
+
   const renderizarOpcao = (opcao, lider) => (
     <View key={opcao.chave} style={styles.opcao} wrap={false}>
       <View style={styles.opcaoLinha}>
@@ -330,6 +343,19 @@ const RelatorioPDF = ({ snapshot }) => {
         ) : null}
 
         {opcoes.map((opcao) => renderizarOpcao(opcao, !empate && liderNome === opcao.rotulo))}
+
+        {dados.modo === 'aberta' && proposta.votosPorUnidade?.length > 0 ? (
+          <View style={{ marginTop: 8, padding: 6, backgroundColor: '#F3F4F6', borderRadius: 4 }} wrap={false}>
+            <Text style={{ fontSize: 8, fontWeight: 'bold', color: CORES.texto, marginBottom: 3 }}>
+              Votação aberta — Votos registrados por unidade:
+            </Text>
+            <Text style={{ fontSize: 8, color: '#374151', lineHeight: 1.3 }}>
+              {proposta.votosPorUnidade
+                .map((v) => `Casa ${v.numero}: ${v.opcao}${v.inadimplente ? ' (inadimplente)' : ''}`)
+                .join('  ·  ')}
+            </Text>
+          </View>
+        ) : null}
       </View>
     );
   };
@@ -382,9 +408,7 @@ const RelatorioPDF = ({ snapshot }) => {
           <View style={styles.infoLinha}>
             <Text style={styles.infoLabel}>Registros de voto</Text>
             <Text style={styles.infoValor}>
-              {formatarNumero(dados.totalVotos, 0)} votos (
-              {formatarNumero(dados.votosSelados, 0)} selados ·{' '}
-              {formatarNumero(dados.votosAbertos, 0)} abertos)
+              {votosRegistrados} votos ({votosSelados} selados · {votosAbertos} abertos)
             </Text>
           </View>
           {dados.algoritmo || dados.versaoEnvelope ? (
@@ -400,7 +424,7 @@ const RelatorioPDF = ({ snapshot }) => {
 
         {dados.modo === 'restrita' || dados.modo === 'fechada' ? (
           <View style={styles.aviso} wrap={false}>
-            <Text style={styles.avisoTitulo}>Votação restrita — sigilo declarado</Text>
+            <Text style={styles.avisoTitulo}>Votação fechada — sigilo declarado</Text>
             <Text style={styles.avisoTexto}>
               Os votos desta assembleia foram registrados no banco de dados com
               leitura bloqueada para o síndico e para os demais participantes. A

@@ -33,8 +33,8 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { obterDb } from './firebase';
-import { lerAssembleia, lerVotosIndividuais } from './data';
+import { obterAuth, obterDb } from './firebase';
+import { lerAssembleia, lerPropostas, lerVotosIndividuais } from './data';
 import {
   COLECOES,
   STATUS_ASSEMBLEIA,
@@ -198,6 +198,50 @@ export async function encerrarAssembleia(assembleiaId) {
     });
     return { ok: true };
   });
+}
+
+/**
+ * Publica o snapshot da apuração de uma assembleia JÁ existente.
+ *
+ * Foi separado do encerramento porque uma assembleia pode ter sido encerrada por
+ * um caminho que não publicou (era o caso da tela de histórico). Aqui a operação
+ * é idempotente na intenção: se o resultado ainda não existe, ele é criado; se já
+ * existe, o `setDoc` da regra de `create` é recusado e o erro sobe.
+ *
+ * Lê as propostas e a base de unidades do PRÓPRIO banco — quem chama não precisa
+ * conhecer a forma interna da assembleia.
+ */
+export async function publicarResultadoDeAssembleia(assembleiaId) {
+  const [assembleia, propostas] = await executar(() =>
+    Promise.all([lerAssembleia(assembleiaId), lerPropostas(assembleiaId)])
+  );
+
+  const resultado = await publicarResultado({
+    assembleiaId,
+    propostas,
+    unidadesAptas: assembleia?.unidadesAptas ?? 0,
+    publicadoPor: obterAuth()?.currentUser?.uid ?? null,
+  });
+
+  return {
+    ...resultado,
+    unidadesAptas: assembleia?.unidadesAptas ?? 0,
+    titulo: assembleia?.titulo ?? '',
+    modo: assembleia?.modo ?? null,
+  };
+}
+
+/**
+ * Encerra a votação E publica o resultado numa única operação.
+ *
+ * É esta a função que TODAS as telas devem chamar. Antes, a tela de resultados
+ * publicava e a de histórico não — e uma assembleia encerrada pelo histórico
+ * ficava sem resultado (a votação restrita, em especial, não teria de onde tirar
+ * a contagem, porque os votos individuais são sigilosos).
+ */
+export async function encerrarVotacao(assembleiaId) {
+  await encerrarAssembleia(assembleiaId);
+  return publicarResultadoDeAssembleia(assembleiaId);
 }
 
 // -----------------------------------------------------------------------------

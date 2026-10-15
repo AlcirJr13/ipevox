@@ -1,102 +1,68 @@
 "use client";
 
 /**
- * ipevox — Resultados e apuração
+ * ipevox — Acompanhamento de resultados e apuração
  * =============================================================================
- * DEFEITOS CORRIGIDOS AQUI:
- *
- *  1. PERCENTUAL ENGANOSO. A tela calculava percentual apenas sobre os votantes,
- *     então 3 votos "Sim" de 59 unidades apareciam como "100%" com barra verde.
- *     Agora todo número tem base explícita: percentual dos votos E percentual
- *     das unidades aptas, mais o quórum.
- *
- *  2. FALHA SILENCIOSA. Se o listener de votos falhasse, o erro caía em
- *     `console.error` e a tela mostrava todas as barras em zero — indistinguível
- *     de "ninguém votou". Agora existe erro visível e estado vazio explícito.
- *
- *  3. LEITURA DE VOTOS INDIVIDUAIS. A tela lia a coleção `votos` inteira e
- *     agregava no cliente — o que, em assembleia aberta, é legítimo, e em
- *     assembleia selada é impossível. Agora o placar vem da coleção `contagem`,
- *     que contém apenas totais; nenhum dado individual trafega até aqui.
- *
- *  4. PDF PESADO NO BUNDLE. `@react-pdf/renderer` era importado no topo. Passa a
- *     ser carregado sob demanda, no clique, porque a maioria das visitas nunca
- *     gera PDF.
+ * - Placar e gráficos de barras em tempo real durante a votação.
+ * - Barras de progresso com cores distintas para cada opção (Sim, Não, Abstenção,
+ *   ou outras cadastradas pelo síndico).
+ * - Na votação aberta: detalhamento transparente dos votos por casa em grade limpa.
+ * - Encerramento imediato sem necessidade de etapa manual de "apurar e publicar".
  */
 
 import { PainelComBarra } from '@/components/BarraLateral';
-import SeloModo from '@/components/SeloModo';
-import { IconeAlerta, IconeDocumento } from '@/components/Icones';
+import { IconeAlerta, IconeCheck, IconeDocumento } from '@/components/Icones';
 import { ModalConfirmacao } from '@/components/Modais';
-import { useSessao } from '@/lib/auth';
-import { encerrarAssembleia, publicarResultado } from '@/lib/api';
+import { useSessao, useSessaoAnonima } from '@/lib/auth';
+import { encerrarVotacao, publicarResultadoDeAssembleia } from '@/lib/api';
 import {
   escutarAssembleia,
-  escutarContagem,
+  escutarCatalogoUnidades,
   escutarParticipacao,
   escutarResultado,
+  escutarVotos,
   lerPropostas,
-  montarApuracaoDeResultado,
+  montarApuracaoAoVivo,
 } from '@/lib/data';
-import { MODOS, formatarData } from '@/lib/schema';
+import { MODOS, formatarData, obterConfigOpcao } from '@/lib/schema';
 import { useParams, useRouter } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-
-/** Cor da barra por faixa de adesão. Evita o verde automático da versão antiga. */
-function corDaBarra(percentualAptas) {
-  if (percentualAptas >= 50) return 'bg-green-500';
-  if (percentualAptas >= 25) return 'bg-blue-500';
-  if (percentualAptas > 0) return 'bg-amber-500';
-  return 'bg-gray-700';
-}
+import { useEffect, useMemo, useState } from 'react';
 
 export default function Resultados() {
   const router = useRouter();
   const { id: assembleiaId } = useParams();
-  /**
-   * `ehOperador` e NÃO `ehAdmin`.
-   *
-   * Esta tela usava `ehAdmin`, que é verdadeiro apenas para quem tem documento em
-   * `/admins/{uid}` — ou seja, o síndico cadastrado. O ADMINISTRADOR DO SISTEMA é
-   * reconhecido pelo e-mail fixado em `firestore.rules`, o que define
-   * `ehSuperAdmin`, e `ehAdmin` fica FALSO para ele.
-   *
-   * O efeito era duplo e silencioso: a barra lateral não aparecia (o casco caía
-   * no formato de morador) e os botões "Encerrar votação" e "Apurar e publicar"
-   * não eram renderizados — o administrador não conseguia encerrar nem publicar
-   * resultado, exatamente as duas ações que só ele pode fazer.
-   */
-  const { ehOperador, usuario } = useSessao();
 
-  // DIAGNÓSTICO TEMPORÁRIO: mostra o papel resolvido, que decide se a barra
-  // lateral e os botões de operador aparecem. Se `ehOperador` for falso para o
-  // administrador, é aqui que se vê.
-  console.log('[ipevox] resultados — papeis:', {
-    temUsuario: Boolean(usuario),
-    email: usuario?.email ?? null,
-    uid: usuario?.uid ?? null,
-    ehOperador,
-  });
+  // Garante sessão anônima para regras do Firestore
+  useSessaoAnonima();
+  const { ehOperador } = useSessao();
 
   const [assembleia, setAssembleia] = useState(null);
   const [propostas, setPropostas] = useState([]);
   const [propostasCarregadas, setPropostasCarregadas] = useState(false);
+  const [votos, setVotos] = useState([]);
+  const [catalogo, setCatalogo] = useState([]);
   const [resultado, setResultado] = useState(null);
   const [participacao, setParticipacao] = useState({ unidadesQueVotaram: 0 });
   const [erro, setErro] = useState('');
   const [encerrando, setEncerrando] = useState(false);
   const [confirmandoEncerrar, setConfirmandoEncerrar] = useState(false);
-  const [publicando, setPublicando] = useState(false);
-  const [confirmandoPublicar, setConfirmandoPublicar] = useState(false);
   const [avisoEncerramento, setAvisoEncerramento] = useState('');
   const [gerandoPdf, setGerandoPdf] = useState(false);
+  const [consolidando, setConsolidando] = useState(false);
 
-  // `carregando` é DERIVADO, não um state à parte. Manter um state separado
-  // exigia um efeito para sincronizá-lo — e a tela podia ficar presa em
-  // "Carregando…" quando havia erro, porque nada desligava a flag.
+  // Controle de expansão de detalhes de votos por casa na votação aberta (inicia recolhido)
+  const [detalhesAbertos, setDetalhesAbertos] = useState({});
+
+  const toggleDetalhes = (propostaId) => {
+    setDetalhesAbertos((prev) => ({
+      ...prev,
+      [propostaId]: !prev[propostaId],
+    }));
+  };
+
   const carregando = !erro && (!assembleia || !propostasCarregadas);
 
-  // Propostas: leitura única. A pauta não muda depois de criada.
+  // 1. Carrega propostas da assembleia
   useEffect(() => {
     if (!assembleiaId) return;
     let ativo = true;
@@ -120,15 +86,12 @@ export default function Resultados() {
     return () => { ativo = false; };
   }, [assembleiaId]);
 
-  // Assembleia, placar e participação em tempo real.
+  // 2. Listeners em tempo real
   useEffect(() => {
     if (!assembleiaId) return;
 
     const falhaListener = (falha) => {
-      setErro(
-        'Não foi possível acompanhar a apuração em tempo real. '
-        + (falha?.message ?? 'Verifique sua conexão.')
-      );
+      console.error('[ipevox] erro no listener:', falha);
     };
 
     const cancelarAssembleia = escutarAssembleia(
@@ -140,173 +103,104 @@ export default function Resultados() {
         }
         setAssembleia(dados);
       },
+      (err) => setErro('Não foi possível acompanhar a assembleia: ' + err.message)
+    );
+
+    const cancelarCatalogo = escutarCatalogoUnidades(
+      (listaUnidades) => setCatalogo(listaUnidades),
       falhaListener
     );
 
-    // O RESULTADO PUBLICADO é a fonte da apuração nesta tela.
-    //
-    // O defeito corrigido aqui: a tela montava a apuração a partir de
-    // `contagens` (placar ao vivo) e `participacao`. Como o placar ao vivo foi
-    // removido do projeto, `contagens` ficava permanentemente `{}` — a tela
-    // exibia "0 votos registrados" e nenhuma proposta, mesmo com votos gravados.
-    // Nada aqui lia o documento `/resultados`, que é onde a apuração realmente
-    // vive depois de publicada.
+    const cancelarParticipacao = escutarParticipacao(
+      assembleiaId,
+      (dados) => setParticipacao(dados),
+      falhaListener
+    );
+
     const cancelarResultado = escutarResultado(
       assembleiaId,
       (dados) => setResultado(dados),
       falhaListener
     );
 
-    const cancelarParticipacao = escutarParticipacao(assembleiaId, setParticipacao, falhaListener);
-
     return () => {
       cancelarAssembleia();
-      cancelarResultado();
+      cancelarCatalogo();
       cancelarParticipacao();
+      cancelarResultado();
     };
   }, [assembleiaId]);
 
-  /**
-   * Dados exibidos. Duas situações bem diferentes, que antes se confundiam:
-   *
-   *   publicada   -> a apuração vem do documento imutável `/resultados`;
-   *   não publicada -> mostra apenas quantas unidades votaram, sem contagem.
-   *
-   * A distinção é o que permite a mensagem correta: "ainda não publicado" não é
-   * a mesma coisa que "apurado com zero votos".
-   */
-  const exibicao = useMemo(
-    () => montarApuracaoDeResultado({
+  // 2b. Votos individuais só são assinados na votação ABERTA (voto atribuível).
+  //     Na votação RESTRITA o painel não deve acompanhar a apuração em tempo
+  //     real — a contagem só aparece no encerramento, pelo resultado publicado.
+  //     Por isso `/votos` não é lido nesse modo (a regra do Firestore também
+  //     nega a leitura, exceto ao administrador do sistema).
+  const modoVotacao = assembleia?.modo ?? null;
+  useEffect(() => {
+    if (!assembleiaId) return undefined;
+    if (modoVotacao !== MODOS.ABERTA) return undefined;
+    return escutarVotos(
+      assembleiaId,
+      (listaVotos) => setVotos(listaVotos),
+      (falha) => console.error('[ipevox] erro no listener de votos:', falha)
+    );
+  }, [assembleiaId, modoVotacao]);
+
+  // 3. Monta a apuração dinâmica em tempo real
+  const exibicao = useMemo(() => {
+    return montarApuracaoAoVivo({
+      assembleia,
+      propostas,
+      // Na votação restrita os votos individuais NÃO entram na apuração ao vivo:
+      // a contagem vem do resultado publicado (`resultado`) após o encerramento.
+      votos: assembleia?.modo === MODOS.ABERTA ? votos : [],
+      catalogo,
       resultado,
-      unidadesAptas: assembleia?.unidadesAptas ?? 0,
       participacao,
-    }),
-    [resultado, assembleia?.unidadesAptas, participacao]
-  );
+    });
+  }, [assembleia, propostas, votos, catalogo, resultado, participacao]);
 
-  /**
-   * Há resultado publicado?
-   *
-   * Distinguir "não apurado" de "apurado com zero votos" importa: enquanto não
-   * houver publicação, a tela mostra apenas quantas unidades votaram. Foi uma
-   * decisão do projeto não exibir placar durante a votação.
-   *
-   * O critério é a EXISTÊNCIA do documento de resultado, não a flag
-   * `resultadoPublicado` da assembleia. A flag é gravada num segundo `setDoc`,
-   * depois do resultado — então, por um instante, ela estaria `false` com o
-   * resultado já presente. O documento é a fonte da verdade.
-   */
-  const publicado = Boolean(resultado?.apuracao);
-
-  /**
-   * Unidades com direito de deliberar: as aptas do cadastro menos as
-   * inadimplentes, cujo voto não entra na contagem.
-   *
-   * É esta a base do percentual "das unidades aptas" no resultado. As
-   * inadimplentes não votam PARA EFEITO DE DELIBERAÇÃO, então também não podem
-   * inflar o denominador — senão o percentual sairia subestimado.
-   *
-   * Depois de publicada, usa o número CONGELADO no resultado: a inadimplência
-   * pode ter mudado entre a publicação e agora, e o documento da ata precisa
-   * refletir o que valia no momento da apuração.
-   */
-  const unidadesAptasParaDeliberar = useMemo(() => {
-    if (publicado && typeof exibicao.unidadesAptas === 'number') {
-      return exibicao.unidadesAptas;
-    }
-    const total = assembleia?.unidadesAptas ?? 0;
-    const inadimplentes = exibicao.unidadesInadimplentes ?? 0;
-    return Math.max(0, total - inadimplentes);
-  }, [publicado, exibicao.unidadesAptas, exibicao.unidadesInadimplentes, assembleia?.unidadesAptas]);
-
-  // Extraído do objeto de sessão: `usuario` é recriado a cada render, e usá-lo
-  // direto numa dependência de `useCallback` quebra a memoização — o lint acusa
-  // `react-hooks/preserve-manual-memoization`. O `uid` é um valor estável.
-  const uidPublicador = usuario?.uid ?? null;
-
-  const encerrar = useCallback(async () => {
+  const encerrada = assembleia?.status === 'encerrada';
+  const ehVotacaoAberta = assembleia?.modo === MODOS.ABERTA;
+  // A contagem de votos e as barras por opção só podem ser exibidas na votação
+  // aberta (ao vivo) ou, em qualquer modo, depois do encerramento.
+  const votosVisiveis = ehVotacaoAberta || encerrada;
+  // Encerramento da assembleia: encerra E publica o resultado numa só operação.
+  async function encerrar() {
     setConfirmandoEncerrar(false);
     setEncerrando(true);
     setErro('');
     try {
-      // `encerrarAssembleia` devolve apenas `{ ok: true }` — o resumo com
-      // contagem NÃO vem daqui. A versão anterior desta tela lia
-      // `resumo.totalVotos` e exibia "undefined voto(s) de undefined unidade(s)".
-      // O número de votantes está em `participacao`, que já é acompanhada ao
-      // vivo, e as unidades aptas estão na assembleia.
-      await encerrarAssembleia(assembleiaId);
-      setAvisoEncerramento(
-        `Votação encerrada: ${participacao.unidadesQueVotaram} unidade(s) votaram `
-        + `de ${unidadesAptasParaDeliberar} apta(s). `
-        + 'Agora use "Apurar e publicar resultado" para gerar a contagem por opção.'
-      );
+      await encerrarVotacao(assembleiaId);
+      setAvisoEncerramento('Votação encerrada com sucesso! O resultado final está consolidado abaixo.');
     } catch (falha) {
       setErro(falha.message);
     } finally {
       setEncerrando(false);
     }
-  }, [assembleiaId, participacao.unidadesQueVotaram, unidadesAptasParaDeliberar]);
+  }
 
-  /**
-   * Publica a apuração. Lê o espelho anônimo, exclui as unidades inadimplentes e
-   * grava o resultado — que passa a ser imutável.
-   *
-   * Não é memoizada de propósito: é acionada por clique, nunca por efeito, então
-   * o `useCallback` não trazia ganho nenhum — e a regra
-   * `react-hooks/preserve-manual-memoization` do React 19 recusava a memoização
-   * por causa das dependências derivadas da assembleia.
-   */
-  async function publicar() {
-    // DIAGNÓSTICO TEMPORÁRIO — precisamos saber se o clique chega aqui.
-    console.log('[ipevox] publicar() chamada', {
-      assembleiaId,
-      propostas: propostas?.length ?? 0,
-      unidadesAptas: assembleia?.unidadesAptas,
-      uidPublicador,
-      encerrada: assembleia?.status,
-    });
-
-    setConfirmandoPublicar(false);
-    setPublicando(true);
+  // Recuperação: assembleia encerrada por um caminho que não publicou o snapshot
+  // (ex.: encerrada pelo histórico). Reconsolida o resultado a partir do banco.
+  async function consolidarResultado() {
+    setConsolidando(true);
     setErro('');
     try {
-      const resumo = await publicarResultado({
-        assembleiaId,
-        propostas,
-        unidadesAptas: assembleia?.unidadesAptas ?? 0,
-        publicadoPor: uidPublicador,
-      });
-
-      console.log('[ipevox] publicar() concluiu', resumo);
-
-      setAvisoEncerramento(
-        `Resultado publicado: ${resumo.totalVotos} voto(s) considerado(s)`
-        + (resumo.votosExcluidos > 0
-          ? `, ${resumo.votosExcluidos} excluído(s) por inadimplência.`
-          : '.')
-      );
+      await publicarResultadoDeAssembleia(assembleiaId);
+      setAvisoEncerramento('Resultado consolidado com sucesso.');
     } catch (falha) {
-      console.error('[ipevox] publicar() falhou', {
-        message: falha?.message,
-        codigo: falha?.codigo,
-      });
-      setErro(falha.message);
+      setErro(`Não foi possível consolidar o resultado: ${falha.message}`);
     } finally {
-      setPublicando(false);
+      setConsolidando(false);
     }
   }
 
-  const baixarPdf = useCallback(async () => {
+  // Geração e download do relatório PDF
+  async function baixarPdf() {
     setGerandoPdf(true);
     setErro('');
     try {
-      // Carregamento sob demanda: o pacote de PDF (@react-pdf/renderer é pesado)
-      // só entra no bundle quando alguém realmente pede o relatório.
-      //
-      // ATENÇÃO ao formato do import: `pdf` é um export NOMEADO. Escrever
-      // `const [{ pdf }] = await Promise.all([import('@react-pdf/renderer')])`
-      // produz `undefined`, porque o namespace do módulo ES não entrega os
-      // exports nomeados como propriedades desestruturáveis desse jeito.
       const [moduloPdf, moduloRelatorio] = await Promise.all([
         import('@react-pdf/renderer'),
         import('@/components/RelatorioPDF'),
@@ -314,14 +208,24 @@ export default function Resultados() {
       const pdf = moduloPdf.pdf;
       const RelatorioPDF = moduloRelatorio.default;
 
-      // O relatório usa o snapshot gravado no encerramento, não o estado da
-      // tela: é o que faz o PDF corresponder ao que foi registrado.
-      const snapshot = await lerResultado(assembleiaId);
-      if (!snapshot) {
-        throw new Error(
-          'O snapshot da apuração ainda não foi gerado. Encerre a votação primeiro.'
-        );
-      }
+      // O snapshot publicado em `/resultados` guarda a apuração em formato
+      // diferente do que o relatório espera (lista de propostas em `apuracao`,
+      // sem `modo`, `titulo` nem `unidadesQueVotaram`). Por isso o PDF é montado
+      // a partir da apuração ao vivo (`exibicao`), que já incorpora os números
+      // congelados do resultado publicado e as metainformações da assembleia.
+      const snapshot = {
+        assembleiaId,
+        titulo: assembleia?.titulo ?? 'Assembleia',
+        descricao: assembleia?.descricao ?? '',
+        modo: assembleia?.modo ?? MODOS.ABERTA,
+        criadoEm: assembleia?.criadoEm ?? null,
+        encerradoEm: assembleia?.encerradoEm ?? resultado?.publicadoEm ?? null,
+        unidadesAptas: exibicao.unidadesAptas,
+        unidadesQueVotaram: exibicao.unidadesQueVotaram,
+        totalVotos: exibicao.totalParticipacoes,
+        votosExcluidos: exibicao.votosExcluidos,
+        apuracao: exibicao,
+      };
 
       const blob = await pdf(<RelatorioPDF snapshot={snapshot} />).toBlob();
       const url = URL.createObjectURL(blob);
@@ -342,29 +246,32 @@ export default function Resultados() {
     } finally {
       setGerandoPdf(false);
     }
-  }, [assembleiaId]);
+  }
 
   if (carregando) {
     return (
-      <main className="min-h-screen flex items-center justify-center">
-        <p className="text-gray-400 animate-pulse">Carregando apuração…</p>
+      <main className="min-h-screen flex items-center justify-center bg-gray-900">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-9 h-9 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <p className="text-gray-400 font-medium text-sm">Carregando votação em tempo real…</p>
+        </div>
       </main>
     );
   }
 
   if (erro && !assembleia) {
     return (
-      <main className="min-h-screen flex items-center justify-center p-4">
-        <div className="bg-gray-800 rounded-2xl p-8 text-center max-w-md border border-red-900">
+      <main className="min-h-screen flex items-center justify-center p-4 bg-gray-900">
+        <div className="bg-gray-800 rounded-2xl p-8 text-center max-w-md border border-red-900 shadow-2xl">
           <div className="flex justify-center mb-3 text-red-400">
             <IconeAlerta tamanho={36} />
           </div>
           <h1 className="text-xl font-bold text-white mb-2">Erro ao carregar</h1>
-          <p className="text-gray-400 mb-6">{erro}</p>
+          <p className="text-gray-400 mb-6 text-sm">{erro}</p>
           <button
             type="button"
             onClick={() => router.push('/')}
-            className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold"
+            className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold transition"
           >
             Voltar ao início
           </button>
@@ -373,54 +280,73 @@ export default function Resultados() {
     );
   }
 
-  const encerrada = assembleia?.status === 'encerrada';
-  const semVotos = publicado && exibicao.totalParticipacoes === 0;
-
-  // A tela é usada por DOIS públicos, e o casco se adapta a cada um:
-  //
-  //   administrador/síndico -> dentro do painel, com a barra lateral, para poder
-  //                            navegar dali para qualquer outra tela;
-  //   morador               -> página limpa, sem barra. Ele chegou pelo QR Code,
-  //                            não tem conta no painel e uma barra de navegação
-  //                            administrativa só confundiria.
   const conteudo = (
     <>
-      {/* Cabeçalho no padrão das outras telas: título, subtítulo e ações. Só o
-          administrador vê "Encerrar votação" e "Publicar" — o morador acompanha,
-          não decide. */}
+      {/* Cabeçalho da Assembleia */}
       <div className="flex flex-col md:flex-row justify-between items-start md:gap-6 gap-4 mb-8">
         <div className="min-w-0">
-          <h1 className="text-3xl font-bold text-white break-words">
-            {assembleia?.titulo ?? 'Assembleia'}
-          </h1>
-          <div className="flex flex-wrap items-center gap-3 mt-2">
+          <div className="flex flex-wrap items-center gap-2 mb-2">
             <span
-              className={`px-3 py-1 rounded-full text-xs font-medium border ${
-                encerrada
-                  ? 'bg-red-900/50 text-red-300 border-red-800'
-                  : 'bg-green-900/50 text-green-300 border-green-800'
-              }`}
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${encerrada
+                ? 'bg-red-900/50 text-red-300 border-red-800'
+                : 'bg-green-900/50 text-green-300 border-green-800'
+                }`}
             >
-              {encerrada ? 'Encerrada' : 'Em andamento'}
+              {!encerrada && (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
+              )}
+              {encerrada ? 'Votação encerrada' : 'Ao vivo • Votação em andamento'}
             </span>
-            {assembleia?.criadoEm && (
-              <span className="text-gray-500 text-sm">
-                {formatarData(assembleia.criadoEm)}
+
+            {ehVotacaoAberta ? (
+              <span className="px-3 py-1 rounded-full text-xs font-medium bg-blue-900/50 text-blue-200 border border-blue-700">
+                Votação aberta (identificação por casa)
+              </span>
+            ) : (
+              <span className="px-3 py-1 rounded-full text-xs font-medium bg-indigo-900/50 text-indigo-200 border border-indigo-700">
+                Votação fechada (sigilosa)
               </span>
             )}
           </div>
+
+          <h1 className="text-3xl font-extrabold text-white break-words tracking-tight">
+            {assembleia?.titulo ?? 'Assembleia'}
+          </h1>
+
+          {assembleia?.descricao && (
+            <p className="text-gray-400 text-sm mt-1.5 whitespace-pre-line max-w-2xl leading-relaxed">
+              {assembleia.descricao}
+            </p>
+          )}
+
+          {assembleia?.criadoEm && (
+            <p className="text-gray-500 text-xs mt-2 font-mono">
+              Iniciada em: {formatarData(assembleia.criadoEm)}
+            </p>
+          )}
         </div>
 
-        <div className="flex flex-wrap gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {encerrada && ehOperador && !resultado && (
+            <button
+              type="button"
+              onClick={consolidarResultado}
+              disabled={consolidando}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white rounded-xl text-sm font-semibold shadow-lg shadow-amber-900/30 transition"
+            >
+              {consolidando ? 'Consolidando…' : 'Consolidar resultado'}
+            </button>
+          )}
+
           {encerrada && (
             <button
               type="button"
               onClick={baixarPdf}
               disabled={gerandoPdf}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-lg text-sm font-medium transition"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl text-sm font-semibold shadow-lg shadow-blue-900/30 transition"
             >
               <IconeDocumento tamanho={16} />
-              {gerandoPdf ? 'Gerando…' : 'Baixar relatório'}
+              {gerandoPdf ? 'Gerando PDF…' : 'Baixar relatório (PDF)'}
             </button>
           )}
 
@@ -429,301 +355,357 @@ export default function Resultados() {
               type="button"
               onClick={() => setConfirmandoEncerrar(true)}
               disabled={encerrando}
-              className="px-4 py-2 bg-red-900/50 hover:bg-red-900/80 disabled:opacity-60 text-red-300 border border-red-800 rounded-lg text-sm font-medium transition"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-red-800 hover:bg-red-700 text-white border border-red-500 rounded-xl text-sm font-semibold shadow-lg shadow-red-950/50 transition"
             >
               {encerrando ? 'Encerrando…' : 'Encerrar votação'}
             </button>
           )}
-
-          {/*
-            PUBLICAÇÃO DA APURAÇÃO.
-            Sem este botão o resultado nunca aparece: a função existia, mas nada
-            a chamava. E sem publicar, o morador e o síndico não veem contagem
-            nenhuma — nem depois do encerramento.
-          */}
-          {ehOperador && encerrada && !publicado && (
-            <button
-              type="button"
-              onClick={() => setConfirmandoPublicar(true)}
-              disabled={publicando}
-              className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white rounded-lg text-sm font-semibold transition"
-            >
-              {publicando ? 'Publicando…' : 'Apurar e publicar resultado'}
-            </button>
-          )}
         </div>
       </div>
-
-      {assembleia?.modo && <SeloModo modo={assembleia.modo} className="mb-6" />}
 
       {erro && (
         <div
           role="alert"
-          className="mb-6 p-4 bg-red-900/30 border border-red-800 text-red-300 rounded-xl text-sm"
+          className="mb-6 p-4 bg-red-950/50 border border-red-800 text-red-200 rounded-xl text-sm flex items-start gap-3"
         >
-          {erro}
+          <div className="shrink-0 text-red-400 mt-0.5">
+            <IconeAlerta tamanho={18} />
+          </div>
+          <div>{erro}</div>
         </div>
       )}
 
       {avisoEncerramento && (
-        <div className="mb-6 p-4 bg-green-900/30 border border-green-800 text-green-300 rounded-xl text-sm">
-          {avisoEncerramento}
+        <div className="mb-6 p-4 bg-emerald-950/60 border border-emerald-800 text-emerald-200 rounded-xl text-sm flex items-center gap-2.5">
+          <IconeCheck tamanho={18} />
+          <span>{avisoEncerramento}</span>
         </div>
       )}
 
-      {/* Painel de quórum: a base de cálculo, explícita */}
-      <div className="bg-gray-800 border border-gray-700 rounded-2xl p-5 mb-8">
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
-          <div>
-            <div className="text-2xl font-bold text-white">
-              {exibicao.unidadesQueVotaram}
-            </div>
-            <div className="text-xs text-gray-400 mt-1">unidades votaram</div>
+      {/* Cards de Quórum e Estatísticas em Tempo Real */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5 mb-8">
+        <div className="bg-gray-800 border border-gray-700 rounded-2xl p-4 text-center shadow-lg">
+          <div className="text-3xl font-extrabold text-white tracking-tight">
+            {exibicao.unidadesQueVotaram}
           </div>
-          <div>
-            <div className="text-2xl font-bold text-white">
-              {unidadesAptasParaDeliberar}
-            </div>
-            <div className="text-xs text-gray-400 mt-1">unidades aptas</div>
-          </div>
-          <div>
-            <div className="text-2xl font-bold text-blue-400">
-              {/* Denominador é a base de deliberação, não o total do cadastro:
-                  unidade inadimplente não delibera, então não pode diluir o
-                  percentual de participação. */}
-              {unidadesAptasParaDeliberar > 0
-                ? Math.round(
-                    (exibicao.unidadesQueVotaram / unidadesAptasParaDeliberar) * 100
-                  )
-                : 0}
-              %
-            </div>
-            <div className="text-xs text-gray-400 mt-1">participação</div>
-          </div>
-          <div>
-            <div className="text-2xl font-bold text-white">
-              {exibicao.totalParticipacoes}
-            </div>
-            <div className="text-xs text-gray-400 mt-1">votos considerados</div>
-          </div>
+          <div className="text-xs text-gray-400 font-medium mt-1">unidades votaram</div>
         </div>
 
-        {/*
-          Resumo da inadimplência. Existe porque, sem ele, os números não fecham
-          para quem lê a ata: "3 unidades votaram" com "1 voto considerado" parece
-          erro de contagem. A diferença precisa estar explicada na própria tela.
-        */}
-        {(exibicao.votosExcluidos > 0 || exibicao.unidadesInadimplentes > 0) && (
-          <div className="mt-4 pt-3 border-t border-gray-700/60">
-            <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs">
-              {exibicao.unidadesInadimplentes > 0 && (
-                <span className="text-red-300">
-                  <strong className="font-semibold">{exibicao.unidadesInadimplentes}</strong>{' '}
-                  unidade(s) inadimplente(s), fora da base de deliberação
-                </span>
-              )}
-              {exibicao.votosExcluidos > 0 && (
-                <span className="text-red-300">
-                  <strong className="font-semibold">{exibicao.votosExcluidos}</strong>{' '}
-                  voto(s) registrado(s) por essas unidades e NÃO contabilizado(s)
-                </span>
-              )}
-            </div>
-            <p className="text-xs text-gray-500 mt-2 leading-relaxed">
-              A unidade inadimplente vota normalmente, mas o voto dela não entra na
-              contagem da deliberação — por isso o número de votos considerados pode
-              ser menor que o de unidades que votaram.
-            </p>
+        <div className="bg-gray-800 border border-gray-700 rounded-2xl p-4 text-center shadow-lg">
+          <div className="text-3xl font-extrabold text-white tracking-tight">
+            {exibicao.unidadesAptas}
           </div>
-        )}
+          <div className="text-xs text-gray-400 font-medium mt-1">unidades aptas</div>
+        </div>
 
-        <p className="text-xs text-gray-500 mt-4 leading-relaxed border-t border-gray-700/60 pt-3">
-          Cada barra mostra dois números: o percentual <strong>dos votos</strong>{' '}
-          (participação relativa entre quem votou) e o percentual{' '}
-          <strong>das unidades aptas</strong> (peso real na deliberação). O
-          segundo é o que vale para a ata.
-        </p>
+        <div className="bg-gray-800 border border-gray-700 rounded-2xl p-4 text-center shadow-lg">
+          <div className="text-3xl font-extrabold text-sky-400 tracking-tight">
+            {exibicao.unidadesAptas > 0
+              ? Math.round((exibicao.unidadesQueVotaram / exibicao.unidadesAptas) * 100)
+              : 0}
+            %
+          </div>
+          <div className="text-xs text-gray-400 font-medium mt-1">participação / quórum</div>
+        </div>
+
+        <div className="bg-gray-800 border border-gray-700 rounded-2xl p-4 text-center shadow-lg">
+          <div className="text-3xl font-extrabold text-emerald-400 tracking-tight">
+            {votosVisiveis ? exibicao.totalParticipacoes : '—'}
+          </div>
+          <div className="text-xs text-gray-400 font-medium mt-1">votos computados</div>
+        </div>
       </div>
 
-      {/* Resultados por proposta */}
-      {/*
-        Estado "não publicado". A mensagem anterior dizia "A votação foi encerrada
-        sem votos" mesmo com votos gravados — porque a tela não lia o resultado e
-        interpretava a ausência de PLACAR como ausência de VOTOS. São coisas
-        diferentes, e confundir as duas faz o síndico achar que perdeu os votos.
-      */}
-      {!publicado && (
-        <div className="bg-amber-950/30 border border-amber-800/60 rounded-2xl p-6 text-center mb-6">
-          <p className="text-amber-100 font-medium">
-            {encerrada ? 'Resultado ainda não publicado' : 'Apuracão disponível no encerramento'}
+      {/* Alerta de inadimplência, se houver */}
+      {(exibicao.votosExcluidos > 0 || exibicao.unidadesInadimplentes > 0) && (
+        <div className="mb-6 p-4 bg-amber-950/30 border border-amber-900/60 rounded-xl text-xs text-amber-200/90 leading-relaxed">
+          <p className="font-semibold mb-0.5">
+            Unidades inadimplentes registradas ({exibicao.unidadesInadimplentes})
           </p>
-          <p className="text-amber-200/70 text-sm mt-2 leading-relaxed">
-            {encerrada
-              ? 'A votação foi encerrada e os votos estão gravados. Use "Apurar e publicar '
-                + 'resultado" para gerar a contagem por opção — ela é publicada uma única vez e '
-                + 'não pode ser alterada depois.'
-              : 'Durante a votação não há placar: a contagem por opção só é publicada no '
-                + 'encerramento, para não influenciar quem ainda vai votar.'}
+          <p className="text-amber-200/70">
+            Os votos de unidades inadimplentes são registrados para auditoria, mas não entram na contagem de deliberação.
+            {exibicao.votosExcluidos > 0 && ` (${exibicao.votosExcluidos} voto(s) desconsiderado(s)).`}
           </p>
         </div>
       )}
 
-      {semVotos && (
-        <div className="bg-gray-800/60 border border-gray-700 rounded-2xl p-6 text-center mb-6">
-          <p className="text-gray-300 font-medium">Nenhum voto foi considerado.</p>
-          <p className="text-gray-500 text-sm mt-2">
-            {exibicao.votosExcluidos > 0
-              ? `Todos os ${exibicao.votosExcluidos} voto(s) registrados vieram de unidades `
-                + 'inadimplentes, que não entram na contagem da deliberação.'
-              : 'A votação foi encerrada sem nenhum voto registrado.'}
-          </p>
-        </div>
-      )}
-
+      {/* Lista de Propostas com UI Baseada em image_0.png */}
       <div className="space-y-6">
-        {exibicao.propostas.map((prop) => {
+        {exibicao.propostas.map((prop, idx) => {
           const totalVotos = prop.totalVotos;
+          const temDetalhesAbertos = Boolean(detalhesAbertos[prop.propostaId]);
 
           return (
             <div
               key={prop.propostaId}
-              className="bg-gray-800 rounded-2xl p-6 border border-gray-700 shadow-lg"
+              className="bg-gray-800 rounded-2xl p-6 sm:p-7 border border-gray-700 shadow-2xl transition-all"
             >
-              <div className="flex justify-between items-start gap-3 mb-4">
-                <h2 className="text-xl font-semibold text-white">
-                  {prop.ordem}. {prop.titulo}
-                </h2>
-                <span className="shrink-0 bg-gray-900 text-gray-400 px-3 py-1 rounded-full text-xs font-mono">
-                  {totalVotos} voto(s)
-                </span>
+              {/* Topo da Proposta: Proposta 1, Título e Total de Votos */}
+              <div className="flex justify-between items-start gap-4 mb-4">
+                <div>
+                  <span className="text-xs font-semibold tracking-wider text-blue-400 uppercase">
+                    Proposta {prop.ordem || idx + 1}
+                  </span>
+                  <h2 className="text-2xl font-bold text-white mt-0.5 tracking-tight">
+                    {prop.titulo}
+                  </h2>
+                  {prop.descricao && (
+                    <p className="text-gray-400 text-sm mt-2 whitespace-pre-line leading-relaxed">
+                      {prop.descricao}
+                    </p>
+                  )}
+                </div>
+
+                <div className="shrink-0">
+                  <span className="px-4 py-1.5 bg-gray-900 text-gray-300 rounded-full text-xs font-mono font-medium border border-gray-700 shadow-sm">
+                    {votosVisiveis ? `${totalVotos} voto(s)` : '🔒 sigiloso'}
+                  </span>
+                </div>
               </div>
 
-              {prop.descricao && (
-                <p className="text-gray-400 text-sm mb-4 whitespace-pre-line">
-                  {prop.descricao}
-                </p>
-              )}
-
-              <div className="space-y-4">
-                {prop.opcoes.map((o) => (
-                  <div key={o.opcao}>
-                    <div className="flex justify-between items-baseline text-sm mb-1 gap-3">
-                      <span className="text-gray-200 font-medium truncate">
-                        {o.opcao}
-                      </span>
-                      <span className="text-gray-400 shrink-0 text-right">
-                        <span className="text-white font-semibold">{o.votos}</span>
-                        {' · '}
-                        {o.percentual}% dos votos
-                        <span className="text-gray-500">
-                          {' · '}
-                          {o.percentualAptas}% das unidades
+              {/* Banner de Resultado / Empate / Líder (Estilo image_0.png) */}
+              {votosVisiveis ? (
+              <>
+              <div className="mb-5">
+                {totalVotos === 0 ? (
+                  <div className="px-5 py-4 rounded-xl bg-gray-900 border border-gray-700 text-gray-400 text-sm flex items-center gap-2">
+                    <span>Aguardando os primeiros votos nesta proposta…</span>
+                  </div>
+                ) : prop.empate ? (
+                  <div className="px-5 py-4 rounded-xl bg-amber-500/10 border border-amber-500/40 text-amber-300 text-sm font-medium flex items-center gap-2.5 shadow-sm">
+                    <span className="text-base">⚖️</span>
+                    <span>
+                      {encerrada
+                        ? 'Resultado final: Empate entre as opções mais votadas'
+                        : 'Empate no momento entre as opções mais votadas'}
+                    </span>
+                  </div>
+                ) : prop.aprovada ? (
+                  <div
+                    className={`px-5 py-4 rounded-xl border text-sm font-medium flex items-center justify-between gap-3 shadow-sm ${encerrada
+                        ? 'bg-blue-500/10 border-blue-500/40 text-blue-200'
+                        : 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                      }`}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-base">{encerrada ? '🏆' : '●'}</span>
+                      <span>
+                        {encerrada ? 'Resultado final: Mais votada — ' : 'Liderando no momento — '}
+                        <strong className={`font-bold ${encerrada ? 'text-blue-100' : 'text-emerald-200'}`}>
+                          {prop.aprovada.opcao}
+                        </strong>
+                        {' '}
+                        <span className={encerrada ? 'text-blue-300/80' : 'text-emerald-300/80'}>
+                          ({prop.aprovada.votos} voto{prop.aprovada.votos === 1 ? '' : 's'})
                         </span>
                       </span>
                     </div>
-                    <div className="w-full bg-gray-900 rounded-full h-3 overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all duration-700 ease-out ${corDaBarra(o.percentualAptas)}`}
-                        style={{ width: `${o.percentualAptas}%` }}
-                      />
-                    </div>
+                    {!encerrada && (
+                      <span className="text-[11px] font-mono text-emerald-200 bg-emerald-900 px-2.5 py-1 rounded border border-emerald-600">
+                        ao vivo
+                      </span>
+                    )}
                   </div>
-                ))}
-              </div>
-
-              <div className="mt-4 pt-3 border-t border-gray-700/60 text-sm">
-                {/*
-                  Campos gravados por `publicarResultado`: `empate` (booleano) e
-                  `aprovada` (opção vencedora, ou null em caso de empate).
-
-                  DEFEITO CORRIGIDO: aqui a tela lia `prop.empatadas.join(...)`,
-                  `prop.maisVotada` e `prop.quorumPercentual` — três campos que a
-                  função NUNCA gravou. Quando `empate` era verdadeiro, o `.join`
-                  de `undefined` derrubava a tela inteira com
-                  "Cannot read properties of undefined (reading 'join')".
-                */}
-                {totalVotos === 0 ? (
-                  <span className="text-gray-500">Sem votos nesta proposta.</span>
-                ) : prop.empate ? (
-                  <span className="text-amber-300 font-medium">
-                    Empate — não houve maioria nesta proposta.
-                  </span>
-                ) : prop.aprovada ? (
-                  <span className="text-green-300 font-medium">
-                    Aceita por maioria: {prop.aprovada.opcao} ({prop.aprovada.votos} voto(s))
-                  </span>
                 ) : (
-                  <span className="text-gray-500">Sem maioria definida.</span>
+                  <div className="px-5 py-4 rounded-xl bg-gray-900 border border-gray-700 text-gray-400 text-sm">
+                    Sem maioria definida.
+                  </div>
                 )}
               </div>
+
+              {/* Barras de Progresso por Opção com Cores Distintas (Inspiradas em image_0.png) */}
+              <div className="space-y-3">
+                {prop.opcoes.map((o, opIdx) => {
+                  const config = obterConfigOpcao(o.opcao, opIdx);
+                  const temVotos = o.votos > 0;
+
+                  return (
+                    <div
+                      key={o.opcao}
+                      className="p-5 rounded-xl bg-gray-900 border border-gray-700 transition-all hover:border-gray-600 shadow-sm"
+                    >
+                      {/* Linha superior: Nome da Opção na esquerda, contagem e percentual na direita */}
+                      <div className="flex justify-between items-baseline gap-3 mb-2.5">
+                        <span className="text-white font-semibold text-base tracking-wide">
+                          {o.opcao}
+                        </span>
+
+                        <div className="text-right shrink-0">
+                          {temVotos ? (
+                            <>
+                              <span className="text-white font-bold text-sm">
+                                {o.votos} voto{o.votos === 1 ? '' : 's'}
+                              </span>
+                              <span className="text-gray-400 font-normal text-xs ml-1.5">
+                                ({o.percentual}% dos votos)
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="text-gray-400 font-medium text-sm">0 votos</span>
+                              <span className="text-gray-500 font-normal text-xs ml-1.5">
+                                (0% dos votos)
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Barra de progresso horizontal, com cor em estilo INLINE.
+                          A cor não pode depender de classe do Tailwind: as classes
+                          de opção vivem em `shared/` e o dev server não as gerava,
+                          o que deixava a barra invisível. Com style inline a cor
+                          entra direto no elemento, sempre. */}
+                      <div
+                        className="w-full rounded-full overflow-hidden"
+                        style={{ height: '10px', backgroundColor: '#374151' }}
+                      >
+                        <div
+                          className="h-full rounded-full transition-all duration-700 ease-out"
+                          style={{
+                            width: `${temVotos ? Math.max(o.percentual, 3) : 0}%`,
+                            backgroundColor: temVotos ? config.hex : 'transparent',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              </>
+              ) : (
+                <div className="px-5 py-4 rounded-xl bg-gray-900 border border-gray-700 text-gray-400 text-sm flex items-center gap-2.5">
+                  <span className="text-base">🔒</span>
+                  <span>
+                    Votação restrita em andamento — a contagem de votos e as barras por
+                    opção serão divulgadas somente após o encerramento.
+                  </span>
+                </div>
+              )}
+
+              {/* Detalhamento dos Votos por Casa na Votação Aberta (Inspirado em image_1.png) */}
+              {ehVotacaoAberta && (
+                <div className="mt-6 pt-4 border-t border-gray-700/80">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <span>📄 Votos registrados por casa</span>
+                        <span className="text-xs text-blue-400 font-mono font-medium">
+                          ({prop.votosPorUnidade?.length ?? 0} voto(s))
+                        </span>
+                      </h3>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        Transparência total: veja a opção escolhida por cada unidade.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => toggleDetalhes(prop.propostaId)}
+                      className="self-start sm:self-auto px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 border border-gray-600 rounded-lg text-xs font-semibold transition shadow-sm"
+                    >
+                      {temDetalhesAbertos ? 'Ocultar detalhes' : 'Ver detalhes'}
+                    </button>
+                  </div>
+
+                  {/* Grade de Cartões de Casas (Estrutura idêntica a image_1.png) */}
+                  {temDetalhesAbertos && (
+                    <div className="mt-4 pt-2">
+                      {prop.votosPorUnidade && prop.votosPorUnidade.length > 0 ? (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-96 overflow-y-auto pr-1">
+                          {prop.votosPorUnidade.map((item) => {
+                            const configItem = obterConfigOpcao(
+                              item.opcao,
+                              Math.max(0, prop.opcoes.findIndex((o) => o.opcao === item.opcao))
+                            );
+
+                            return (
+                              <div
+                                key={item.votoId || `${item.numero}-${item.opcao}`}
+                                className={`p-4 rounded-xl border transition flex flex-col justify-between gap-3 ${item.inadimplente
+                                  ? 'bg-red-950/20 border-red-900/80 text-red-200'
+                                  : 'bg-gray-900 border-gray-700 text-gray-200 hover:border-gray-600'
+                                  }`}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="font-bold text-white text-sm">
+                                    Casa {item.numero}
+                                  </span>
+                                  {item.inadimplente && (
+                                    <span className="text-[11px] text-red-400 font-mono font-medium">
+                                      inadimplente
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                  <span className="text-gray-400 text-xs font-normal">Voto:</span>
+                                  <span
+                                    className="font-semibold text-xs px-2.5 py-0.5 rounded-md border truncate"
+                                    style={configItem.estiloBadge}
+                                  >
+                                    {item.opcao}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-gray-500 text-xs italic py-2">
+                          Nenhum voto registrado para esta proposta até o momento.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Informação sobre sigilo se a votação for restrita */}
+              {!ehVotacaoAberta && (
+                <div className="mt-5 pt-3 border-t border-gray-700/80 text-xs text-gray-500 flex items-center gap-1.5">
+                  <span>🔒 Votação fechada: os votos individuais por unidade são sigilosos.</span>
+                </div>
+              )}
             </div>
           );
         })}
       </div>
 
       {propostas.length === 0 && !erro && (
-        <p className="text-gray-500 text-center py-8">
-          Esta assembleia não tem propostas registradas.
-        </p>
+        <div className="bg-gray-800 rounded-2xl p-12 text-center border border-gray-700">
+          <p className="text-gray-400 text-base">Esta assembleia não possui propostas cadastradas.</p>
+        </div>
       )}
 
-      {encerrada && assembleia?.modo === MODOS.FECHADA && (
-        <p className="text-xs text-gray-500 mt-8 leading-relaxed">
-          Esta assembleia teve votos em modo restrito. Os números acima vêm da
-          apuração publicada no encerramento, que é gravada uma única vez e não
-          pode ser alterada. A identificação de como cada unidade votou fica
-          restrita ao administrador do sistema — nem o síndico tem acesso a ela.
-        </p>
-      )}
-
+      {/* Modal de Confirmação de Encerramento */}
       {confirmandoEncerrar && (
         <ModalConfirmacao
           titulo="Encerrar a votação agora?"
           consequencia={
             'Esta ação é irreversível.\n\n'
-            + 'Nenhum voto novo será aceito a partir de agora. Encerrar NÃO publica o '
-            + 'resultado: depois disso você ainda precisa usar "Apurar e publicar '
-            + 'resultado" para que a contagem apareça aos participantes.'
+            + 'Nenhum novo voto será aceito e o resultado final será consolidado imediatamente. '
+            + 'Você e todos os participantes poderão visualizar o resultado definitivo e baixar o relatório em PDF.'
           }
           rotuloConfirmar="Encerrar votação"
-          rotuloCancelar="Voltar"
+          rotuloCancelar="Cancelar"
           destrutivo
           processando={encerrando}
           aoConfirmar={encerrar}
           aoFechar={() => setConfirmandoEncerrar(false)}
         />
       )}
-
-      {confirmandoPublicar && (
-        <ModalConfirmacao
-          titulo="Apurar e publicar o resultado?"
-          consequencia={
-            `Serão contados os votos registrados em ${propostas.length} proposta(s) e `
-            + 'gravada a contagem por opção.\n\n'
-            + 'O resultado é gravado UMA ÚNICA VEZ e não pode ser alterado depois — '
-            + 'nem por você. Confira se todos os votos esperados já foram '
-            + `registrados (${participacao.unidadesQueVotaram} de `
-            + `${unidadesAptasParaDeliberar} unidades aptas) antes de publicar.\n\n`
-            + 'Os votos de unidades inadimplentes são excluídos da contagem '
-            + 'automaticamente.'
-          }
-          rotuloConfirmar="Publicar resultado"
-          rotuloCancelar="Ainda não"
-          processando={publicando}
-          aoConfirmar={publicar}
-          aoFechar={() => setConfirmandoPublicar(false)}
-        />
-      )}
     </>
   );
 
-  // Morador: página limpa. Administrador e síndico: dentro do painel.
+  // Usuário operador/administrador: exibe dentro da barra lateral do painel
   if (ehOperador) {
     return <PainelComBarra largura="max-w-4xl">{conteudo}</PainelComBarra>;
   }
 
+  // Morador ou visitante: layout centralizado imersivo
   return (
-    <main className="min-h-screen py-12 px-4">
+    <main className="min-h-screen py-10 px-4 bg-gray-900">
       <div className="max-w-4xl mx-auto">{conteudo}</div>
     </main>
   );

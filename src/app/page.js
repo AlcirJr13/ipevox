@@ -294,12 +294,12 @@ export default function LandingPage() {
                 </ul>
               </div>
 
-              {/* Votação restrita — o nome mudou de "selada" para "restrita"
+              {/* Votação fechada — o nome mudou de "selada" para "restrita"
                   quando a criptografia saiu: chamar de "selado" um voto que fica
                   em texto claro no banco seria promessa falsa. */}
               <div className="group bg-gradient-to-br from-green-900/20 to-green-800/10 border border-green-500/20 rounded-2xl p-10 hover:border-green-500/50 transition-all duration-300 hover:shadow-2xl hover:shadow-green-500/10">
                 <div aria-hidden="true" className="text-4xl mb-6">🔐</div>
-                <h4 className="text-2xl font-semibold mb-6 text-green-400">Votação restrita</h4>
+                <h4 className="text-2xl font-semibold mb-6 text-green-400">Votação fechada</h4>
                 <ul className="space-y-4">
                   {itensVotacaoRestrita.map((item) => (
                     <li key={item} className="flex items-start gap-3 text-gray-300 group-hover:text-white transition-colors">

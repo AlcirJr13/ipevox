@@ -2,7 +2,7 @@
 
 import { PainelComBarra } from '@/components/BarraLateral';
 import { useExigirAdmin } from '@/lib/auth';
-import { encerrarAssembleia } from '@/lib/api';
+import { encerrarVotacao } from '@/lib/api';
 import { escutarAssembleias } from '@/lib/data';
 import { MODOS, ROTULOS_MODO, formatarData } from '@/lib/schema';
 import { Modal } from '@/components/Modais';
@@ -77,10 +77,11 @@ export default function HistoricoAssembleias() {
     setErro('');
 
     try {
-      // O encerramento é decidido e executado pelo servidor: ele reconta os
-      // votos do zero, grava o snapshot da ata e só então marca a assembleia
-      // como encerrada. O cliente não escreve nada.
-      const resposta = await encerrarAssembleia(assembleiaParaEncerrar.id);
+      // Encerra e publica o snapshot da apuração numa única operação, contando a
+      // partir do espelho anônimo `/votos_contagem`. Sem isso a assembleia ficava
+      // encerrada e SEM resultado — e na votação restrita não há de onde
+      // recuperar a contagem, porque os votos individuais são sigilosos.
+      const resposta = await encerrarVotacao(assembleiaParaEncerrar.id);
       setResultadoEncerramento(resposta);
       setAssembleiaParaEncerrar(null);
     } catch (falha) {

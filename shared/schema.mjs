@@ -92,14 +92,13 @@ export const MODOS_VALIDOS = Object.values(MODOS);
 
 export const ROTULOS_MODO = {
   [MODOS.ABERTA]: 'Votação aberta',
-  [MODOS.FECHADA]: 'Votação restrita',
+  [MODOS.FECHADA]: 'Votação fechada',
 };
 
 export const DESCRICAO_MODO = {
   [MODOS.ABERTA]:
     'O voto fica registrado junto ao número da unidade. Qualquer participante '
-    + 'pode ver quem votou o que. É o formato previsto no art. 1.335 do Código '
-    + 'Civil e o mais simples de defender em uma impugnação.',
+    + 'pode ver quem votou o quê.',
   [MODOS.FECHADA]:
     'O voto NÃO é exibido ao síndico nem aos moradores, em nenhum momento. '
     + 'Durante a votação não há placar: a contagem por opção só é publicada no '
@@ -611,5 +610,70 @@ export function apurarAssembleia({ propostas = [], contagens = {}, unidadesAptas
     propostas: porProposta,
     unidadesAptas: unidadesAptas,
     totalParticipacoes,
+  };
+}
+
+/**
+ * Configuração visual (cores e estilos) para opções de voto.
+ *
+ * As cores são devolvidas em HEX + estilos inline, e NÃO como classes do
+ * Tailwind. Motivo: as classes viviam neste arquivo (fora de `src/`), e o
+ * varredor de classes do Tailwind não as gerava no servidor de desenvolvimento —
+ * resultado: as barras ficavam sem cor (e às vezes sem altura, quando a classe
+ * `h-2.5` também não era encontrada). Com estilo inline a cor é aplicada direto
+ * no elemento, independente de build, purge ou cache do dev server.
+ *
+ * Opções comuns (Sim, Não, Abstenção) recebem cor semântica; qualquer outra
+ * opção cadastrada pelo síndico cai numa paleta, escolhida pela posição dela na
+ * proposta — o que dá cores distintas e estáveis para "quantas opções quiser".
+ */
+export function obterConfigOpcao(nomeOpcao, indice = 0) {
+  const norm = String(nomeOpcao ?? '').trim().toLowerCase();
+
+  // Opções afirmativas
+  if (['sim', 'a favor', 'aprovo', 'favorável', 'favoravel', 'concordo', 'aceito'].includes(norm)) {
+    return montarConfigOpcao('sim', '#2dd4bf');
+  }
+
+  // Opções negativas
+  if (['não', 'nao', 'contra', 'rejeito', 'desfavorável', 'desfavoravel', 'discordo', 'recuso'].includes(norm)) {
+    return montarConfigOpcao('nao', '#f43f5e');
+  }
+
+  // Opções neutras
+  if (['abstenção', 'abstencao', 'abster', 'em branco', 'branco', 'nulo', 'neutro'].includes(norm)) {
+    return montarConfigOpcao('abstencao', '#fbbf24');
+  }
+
+  // Outras opções personalizadas cadastradas pelo síndico
+  const paletaCustom = [
+    { chave: 'azul', hex: '#38bdf8' },
+    { chave: 'roxo', hex: '#c084fc' },
+    { chave: 'laranja', hex: '#fb923c' },
+    { chave: 'rosa', hex: '#f472b6' },
+    { chave: 'verde-lima', hex: '#a3e635' },
+    { chave: 'indigo', hex: '#818cf8' },
+  ];
+
+  const item = paletaCustom[indice % paletaCustom.length];
+  return montarConfigOpcao(item.chave, item.hex);
+}
+
+/**
+ * Monta a configuração visual a partir de uma cor hex base, derivando o estilo
+ * inline da barra, do texto e do selo (badge) da opção.
+ */
+function montarConfigOpcao(chave, hex) {
+  return {
+    chave,
+    hex,
+    corBarra: hex,
+    estiloBarra: { backgroundColor: hex },
+    estiloTexto: { color: hex },
+    estiloBadge: {
+      backgroundColor: `${hex}22`,
+      color: hex,
+      borderColor: `${hex}99`,
+    },
   };
 }
