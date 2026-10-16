@@ -52,8 +52,8 @@ export default function AdminUnidades() {
     if (!removendo) setUnidadeParaRemover(null);
   }, [removendo]);
 
-  // Recarrega o catálogo do servidor. O cliente não escreve no Firestore: toda
-  // mutação passa por Cloud Function e o estado local vem da releitura.
+  // Recarrega o catálogo do servidor. O estado local vem sempre da releitura,
+  // nunca de escrita otimista.
   async function recarregar() {
     const lista = await lerCatalogo();
     setUnidades(lista);

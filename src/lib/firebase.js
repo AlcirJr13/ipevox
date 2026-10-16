@@ -28,10 +28,6 @@ import {
   setPersistence,
 } from 'firebase/auth';
 import { connectFirestoreEmulator, getFirestore } from 'firebase/firestore';
-import { connectFunctionsEmulator, getFunctions } from 'firebase/functions';
-
-/** Região das Cloud Functions (São Paulo). */
-export const REGIAO_FUNCTIONS = 'southamerica-east1';
 
 const usarEmuladores = process.env.NEXT_PUBLIC_USAR_EMULADORES === 'true';
 
@@ -128,7 +124,6 @@ function conectarEmuladores() {
   emuladoresConectados = true;
   connectAuthEmulator(getAuth(obterApp()), 'http://127.0.0.1:9099', { disableWarnings: true });
   connectFirestoreEmulator(getFirestore(obterApp()), '127.0.0.1', 8080);
-  connectFunctionsEmulator(getFunctions(obterApp(), REGIAO_FUNCTIONS), '127.0.0.1', 5001);
 }
 
 export function obterAuth() {
@@ -151,10 +146,4 @@ export function obterDb() {
   const db = getFirestore(obterApp());
   conectarEmuladores();
   return db;
-}
-
-export function obterFunctions() {
-  const functions = getFunctions(obterApp(), REGIAO_FUNCTIONS);
-  conectarEmuladores();
-  return functions;
 }

@@ -830,7 +830,7 @@ export async function publicarResultado({
 }
 
 // -----------------------------------------------------------------------------
-// Administrador do sistema: listar síndicos, abrir votos, auditoria
+// Administrador do sistema: listar síndicos, ler votos individuais
 // -----------------------------------------------------------------------------
 
 /**
@@ -926,20 +926,9 @@ export async function listarAuditoria() {
     eventos: [],
     indisponivel: true,
     motivo:
-      'A trilha de auditoria dependia de um servidor para registrar os eventos. '
-      + 'Como o projeto passou a operar só com recursos gratuitos, ela não existe '
-      + 'neste modelo. Os votos individuais continuam acessíveis ao administrador '
-      + 'do sistema na aba "Votos", com a contagem por opção.',
+      'Este sistema não mantém um registro de eventos de leitura. Sem servidor, '
+      + 'nada obriga o cliente a gravar eventos de auditoria, então eles não '
+      + 'existem neste modelo. Os votos individuais continuam acessíveis ao '
+      + 'administrador do sistema na seção de leitura de votos.',
   };
-}
-
-/**
- * Compatibilidade: não há mais promoção de administrador pelo aplicativo.
- *
- * O papel de administrador do sistema é decidido pelo e-mail fixado em
- * `firestore.rules`. Manter isto devolvendo sucesso silencioso evita que a tela
- * de login quebre, e o comentário registra que não há nada a fazer aqui.
- */
-export async function promoverSuperAdmin() {
-  return { ok: true, via: 'regras' };
 }

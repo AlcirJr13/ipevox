@@ -7,8 +7,8 @@
  *
  *  1. A CRIAÇÃO ACONTECIA NO CLIENTE. `addDoc(collection(db,'assembleias'))` era
  *     chamado do browser e o Firestore aceitava porque não havia regra. Qualquer
- *     pessoa com o link podia criar assembleia. Agora é a Cloud Function
- *     `criarAssembleia`, que exige síndico.
+ *     pessoa com o link podia criar assembleia. Agora é `criarAssembleia`, que
+ *     exige operador e é validado pelas regras do Firestore.
  *
  *  2. O ID COLIDIA. `asb_${Date.now().toString(36)}` tem resolução de
  *     milissegundo: duas assembleias criadas no mesmo milissegundo (dois cliques,

@@ -10,7 +10,8 @@
  *  1. A validação saiu do browser. Antes, o cliente consultava
  *     `catalogo_unidades` com um `where('numero','==',valor)` e decidia sozinho
  *     se a unidade existia — decisão que qualquer pessoa podia simplesmente não
- *     tomar, chamando o Firestore direto. Agora é `checkIn`, uma Cloud Function.
+ *     tomar, chamando o Firestore direto. Agora é `checkIn`, que valida a
+ *     unidade no banco antes de criar a sessão.
  *
  *  2. A corrida que permitia votar duas vezes foi eliminada. A versão anterior
  *     abria uma transação que lia um RESULTADO DE CONSULTA: duas abas abertas
@@ -115,9 +116,9 @@ export default function Checkin() {
         uid: obterAuth().currentUser?.uid ?? null,
       });
 
-      // Guarda número e comprovanteId para as telas seguintes. O comprovanteId
-      // não é derivável pelo cliente — ele embute a tag HMAC da unidade, que só
-      // o servidor sabe calcular.
+      // Guarda número e comprovanteId para as telas seguintes. O comprovanteId é
+      // derivado do número da unidade (`assembleia~numero`); guardá-lo é
+      // conveniência de navegação.
       guardarSessao(assembleiaId, {
         numero: resposta.numero,
         comprovanteId: resposta.comprovanteId,

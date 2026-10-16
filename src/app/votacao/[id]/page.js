@@ -25,13 +25,13 @@
  *     buscando a mesma coleção, competindo para sobrescrever o mesmo state.
  *
  *  4. O SIGILO. Antes cada voto ia para o banco com `unidadeDocId`, permitindo
- *     montar a tabela "unidade → voto". Em assembleia fechada, o voto agora é
- *     cifrado no servidor, o nome do documento é uma tag HMAC da unidade, e o
- *     morador recebe um recibo que permite conferir o próprio voto no
- *     encerramento sem abrir o de ninguém.
+ *     montar a tabela "unidade → voto" a partir do próprio voto. Agora o vínculo
+ *     com a unidade vive no comprovante e o voto individual tem leitura restrita
+ *     ao administrador do sistema. Limitação registrada no README: o espelho
+ *     usado para apurar ainda vincula a opção ao número da unidade.
  */
 
-import { IconeAlerta, IconeCadeado, IconeCheck, IconeDocumento, IconeSair } from '@/components/Icones';
+import { IconeAlerta, IconeCadeado, IconeCheck, IconeSair } from '@/components/Icones';
 import { ModalConfirmacao } from '@/components/Modais';
 import SeloModo from '@/components/SeloModo';
 import { finalizarSessao, votar } from '@/lib/api';
@@ -45,7 +45,6 @@ import {
 } from '@/lib/data';
 import { MODOS, normalizarNumeroUnidade } from '@/lib/schema';
 import { esquecerSessao, lerComprovanteId, lerNumeroUnidade } from '@/lib/sessao';
-import { guardarRecibo, lerRecibos, recibosParaTexto } from '@/lib/recibo';
 import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -78,8 +77,6 @@ export default function Votacao() {
   const [enviando, setEnviando] = useState(false);
   const [erro, setErro] = useState('');
   const [aviso, setAviso] = useState('');
-  const [recibos, setRecibos] = useState([]);
-  const [reciboCopiado, setReciboCopiado] = useState(false);
   const [confirmandoPular, setConfirmandoPular] = useState(false);
 
   // --- Carga inicial ---------------------------------------------------------
@@ -130,7 +127,6 @@ export default function Votacao() {
         setPropostas(listaPropostas);
         setComprovante(comprovante);
         setVotadas(jaVotadas);
-        setRecibos(lerRecibos(assembleiaId));
 
         const pendente = proximaPropostaPendente(listaPropostas, comprovante.votouEm ?? []);
         setIndiceAtual(pendente === -1 ? 0 : pendente);
@@ -215,12 +211,6 @@ export default function Votacao() {
         ],
       }));
 
-      // Recibo do voto selado: é o único meio de o morador provar depois em que
-      // votou. Fica no aparelho dele, nunca no servidor.
-      if (resposta?.recibo) {
-        setRecibos(guardarRecibo(assembleiaId, resposta.recibo));
-      }
-
       setOpcaoSelecionada('');
       setMostrarConfirmacao(false);
 
@@ -295,29 +285,6 @@ export default function Votacao() {
     setErro('');
   }
 
-  async function copiarRecibo() {
-    try {
-      await navigator.clipboard.writeText(recibosParaTexto(assembleiaId, recibos));
-      setReciboCopiado(true);
-      setTimeout(() => setReciboCopiado(false), 2500);
-    } catch {
-      setErro('Não foi possível copiar o recibo. Selecione o texto manualmente.');
-    }
-  }
-
-  function baixarRecibo() {
-    const conteudo = recibosParaTexto(assembleiaId, recibos);
-    const blob = new Blob([conteudo], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `ipevox-recibo-${assembleiaId}.txt`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-  }
-
   // --- Estados de tela -------------------------------------------------------
 
   if (carregando) {
@@ -366,54 +333,14 @@ export default function Votacao() {
             Unidade {numero} · {numVotadas} de {total} proposta(s) com voto registrado.
           </p>
 
-          {selada && (
-            <div className="bg-indigo-900/30 border border-indigo-700 rounded-xl p-4 mb-6">
-              <p className="flex items-center gap-2 text-indigo-200 font-semibold text-sm mb-2">
-                <IconeCadeado tamanho={16} />
-                Guarde o seu recibo
-              </p>
-              <p className="text-xs text-indigo-100/90 leading-relaxed mb-3">
-                Seus votos foram cifrados antes de serem gravados: o sistema não
-                exibe o conteúdo porque ninguém — nem o síndico, nem o servidor —
-                o mantém legível. O recibo abaixo é o <strong>único meio</strong> de
-                comprovar depois em que você votou. Ele fica apenas neste aparelho.
-              </p>
-
-              {recibos.length === 0 ? (
-                <p className="text-xs text-amber-200 bg-amber-900/20 border border-amber-800/60 rounded-lg p-3">
-                  Nenhum recibo encontrado neste aparelho. Isso acontece quando a
-                  votação foi feita em outro dispositivo ou o armazenamento do
-                  navegador foi limpo. Para identificar seu voto será necessária
-                  uma abertura formal pelo síndico, registrada em auditoria.
-                </p>
-              ) : (
-                <>
-                  <div className="flex flex-wrap gap-2 mb-3">
-                    <button
-                      type="button"
-                      onClick={copiarRecibo}
-                      className="inline-flex items-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm transition"
-                    >
-                      <IconeDocumento tamanho={15} />
-                      {reciboCopiado ? 'Copiado' : 'Copiar recibo'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={baixarRecibo}
-                      className="inline-flex items-center gap-2 px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm transition"
-                    >
-                      Baixar .txt
-                    </button>
-                  </div>
-                  <pre className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-[10px] leading-relaxed text-gray-300 overflow-x-auto whitespace-pre">
-                    {recibosParaTexto(assembleiaId, recibos)}
-                  </pre>
-                </>
-              )}
-            </div>
-          )}
-
-          {!selada && (
+          {selada ? (
+            <p className="text-xs text-indigo-300 mb-6 leading-relaxed">
+              Seus votos não são exibidos nas telas do sistema. A contagem por opção
+              é publicada uma única vez, no encerramento. A leitura do voto
+              individual, com unidade e autor, é restrita ao administrador do
+              sistema.
+            </p>
+          ) : (
             <p className="text-xs text-blue-300 mb-6 leading-relaxed">
               Seus votos estão registrados junto ao número da sua unidade e podem
               ser conferidos no resultado da assembleia.
@@ -523,9 +450,9 @@ export default function Votacao() {
           {selada && (
             <p className="flex items-start gap-2 text-xs text-indigo-300/80 mb-5 leading-relaxed">
               <span className="mt-0.5 shrink-0"><IconeCadeado tamanho={14} /></span>
-              Este voto será cifrado antes de ser gravado. O conteúdo não fica
-              legível no banco de dados, e você receberá um recibo para conferi-lo
-              depois.
+              Este voto não será exibido nas telas do sistema. A contagem por opção
+              só é publicada no encerramento, e a leitura do voto individual é
+              restrita ao administrador do sistema.
             </p>
           )}
 

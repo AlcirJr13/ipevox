@@ -19,8 +19,8 @@ encontrar documentação antiga descrevendo recursos que não existem mais.
 - Um voto por unidade por proposta, garantido pelo ID determinístico do documento
   — o próprio banco é a trava, não o código do site.
 - Dois modos por assembleia: **aberto** (voto atribuível, qualquer participante
-  confere quem votou o quê) e **restrito** (o voto não é exibido ao síndico nem
-  aos moradores).
+  confere quem votou o quê) e **restrito** (o voto individual não é exibido nas
+  telas do sistema — nem ao síndico, nem aos moradores).
 - **Sem placar durante a votação.** Enquanto a assembleia está aberta, só aparece
   quantas unidades já votaram. A contagem por opção existe apenas depois de
   publicada, no encerramento, e é imutável.
@@ -31,6 +31,7 @@ encontrar documentação antiga descrevendo recursos que não existem mais.
 | Limitação | Por quê |
 |---|---|
 | **O voto não é cifrado** | Sem servidor, não há onde guardar a chave. O voto fica em texto claro no banco; a proteção é a regra de leitura |
+| **O síndico consegue montar "unidade → voto"** | O espelho de contagem tem o número da unidade no ID e no campo `tag`, e é legível pelos operadores. O sigilo perante o síndico **não** é garantido pelo banco, só pela interface (ver "Coleções") |
 | **O dono do projeto lê os votos pelo console** | O console do Firebase usa credencial de administrador e ignora as regras. Para o síndico e para os moradores, o bloqueio é efetivo |
 | **Não há trilha de auditoria** | Sem servidor, nada obriga o cliente a registrar eventos |
 | **O total publicado não é conferido pelo banco** | Regra de segurança não consegue contar documentos. A garantia é que o resultado é gravado **uma vez** e nunca muda |
@@ -89,19 +90,21 @@ armadilha real de manutenção.
 | `controle/sindicos_criados` | marcador que fecha o bootstrap | qualquer autenticado |
 | `comprovantes/{asb}~{numero}` | que a unidade participou e quais propostas votou | qualquer autenticado |
 | **`votos/{asb}~{proposta}~{numero}`** | **o voto, com unidade e autor** | **só o administrador do sistema** |
-| `votos_contagem/{mesmo id}` | só proposta e opção — sem unidade, sem autor, sem horário | operadores (para apurar) |
+| `votos_contagem/{mesmo id}` | proposta, opção e `tag` (o número da unidade) — sem autor, sem horário | operadores (para apurar) |
 | `resultados/{asb}` | contagem por opção, publicada uma vez | qualquer autenticado |
 
-O par `votos` / `votos_contagem` é o que resolve uma contradição do projeto: o
-síndico precisa **apurar**, mas não pode **ler votos**. O espelho anônimo permite
-somar as opções sem saber de quem são. A regra exige que os dois documentos
-existam com a mesma opção, então eles não podem divergir sem a escrita ser
-recusada.
+O par `votos` / `votos_contagem` resolve uma parte da contradição do projeto: o
+síndico precisa **apurar**, mas não pode ler o voto completo (com autor) na
+interface. O espelho permite somar as opções. A regra exige que os dois
+documentos existam com a mesma opção, então eles não podem divergir sem a escrita
+ser recusada.
 
-Limitação honesta desse arranjo: o `tag` no ID é o número da unidade. Quem pode
-ler `votos_contagem` descobre **quem participou** (não em que votou), e consegue
-perceber a mesma unidade em assembleias diferentes. Para a ata, isso é
-exatamente o que se quer registrar.
+**Limitação honesta deste arranjo (P0-01):** o `tag` do espelho é o número da
+unidade. Quem pode ler `votos_contagem` — síndico e administrador do sistema —
+consegue montar a tabela **"unidade → opção"**. Ou seja, o sigilo perante o
+síndico é garantido pela **interface**, não pelo banco. A alternativa (não gravar
+o número no espelho) foi descartada porque a exclusão de inadimplentes depende de
+cruzar essa `tag` com o catálogo de unidades.
 
 ---
 
@@ -188,6 +191,7 @@ service account: cadastre pelo painel `/admin/unidades`, que usa o SDK do client
 | `npm test` | testes do schema e da apuração |
 | `npm run deploy` | publica as regras do Firestore |
 | `npm run emuladores` | emuladores de Firestore e Auth |
+| `npm run verificar:regras` | testa as regras no emulador (exige `npm run emuladores` ativo) |
 
 ### Testes
 
@@ -206,21 +210,19 @@ perante o síndico.
 
 ## Limitações conhecidas e o que fazer a respeito
 
-- **Verificação das regras.** As regras do Firestore nunca foram testadas no
-  emulador (exige Java instalado). Elas foram revisadas por leitura e as
-  invariantes das quais dependem têm teste unitário, mas regra de segurança só se
-  prova executando:
+- **Verificação das regras.** As regras do Firestore são exercitadas por um
+  script no emulador (exige Java instalado). Ele tenta as operações que devem ser
+  negadas a um morador anônimo e falha se alguma passar:
 
   ```bash
-  npm run emuladores
+  npm run emuladores        # em um terminal
+  npm run verificar:regras  # em outro
   ```
 
-  Com o SDK do cliente, tente: criar um voto direto, ler `/votos` sem ser o
-  administrador do sistema, e alterar o catálogo sem ser operador. Os três devem
-  ser negados.
-
-- **A tela de auditoria** ainda mostra a trilha de eventos, que não existe neste
-  modelo. A aba de votos individuais funciona; a de trilha explica a ausência.
+- **A leitura de votos não deixa registro.** A tela do administrador do sistema
+  exibe os votos individuais e explica, na própria tela, que a finalidade pedida
+  não é gravada: sem servidor, não há registro permanente. Não existe "trilha de
+  auditoria" neste modelo.
 
 - **Voto por procuração** (representação) não é suportado: hoje é um voto por
   unidade, sem exceção.

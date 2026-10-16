@@ -282,11 +282,3 @@ export function useExigirAdmin(router) {
   const autorizado = Boolean(sessao.usuario) && sessao.ehOperador && !sessao.carregando;
   return { ...sessao, autorizado };
 }
-
-/** Identifica a chave pública usada para o check-in (HMAC da unidade). */
-export function identificadorDaUnidade(numero) {
-  // Neste modelo não há servidor para calcular o HMAC. O identificador passa a
-  // ser derivado do número de forma determinística e estável — é o que garante
-  // uma sessão por unidade, e é o mesmo critério usado nos IDs determinísticos.
-  return String(numero ?? '').trim().toUpperCase().replace(/^0+(?=\d)/, '');
-}

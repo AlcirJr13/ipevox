@@ -14,8 +14,8 @@
  * Se qualquer síndico pudesse criar outros, "quem pode entrar neste sistema?"
  * ficaria sem resposta, e um acesso criado por engano só apareceria depois.
  *
- * As duas ações passam por Cloud Functions que verificam o papel no servidor:
- * esconder o botão aqui não é a proteção, é só a interface.
+ * As duas ações verificam o papel nas regras do Firestore: esconder o botão aqui
+ * não é a proteção, é só a interface.
  */
 
 import { IconeAlerta, IconeCadeado, IconeCheck, IconeEscudo } from '@/components/Icones';

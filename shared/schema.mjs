@@ -2,16 +2,15 @@
  * ipevox — schema canônico (módulo compartilhado)
  * =============================================================================
  * Este arquivo é a fonte única de verdade sobre a forma dos dados. É importado
- * tanto pelo app Next.js (`src/lib/schema.js` reexporta daqui) quanto pelas
- * Cloud Functions (`functions/src/*.js`), para que cliente e servidor nunca
- * divirjam sobre nomes de coleção, campos ou IDs.
+ * tanto pelo app Next.js (`src/lib/schema.js` reexporta daqui) quanto pelos
+ * scripts da raiz (`scripts/*.mjs`), para que as duas pontas nunca divirjam
+ * sobre nomes de coleção, campos ou IDs.
  *
  * Histórico do problema que este arquivo resolve: antes, o vínculo entre voto e
  * unidade era gravado em texto puro (`votos.unidadeDocId`) e a proposta era
  * identificada pelo seu título. Isso quebrava o sigilo e fazia votos sumirem
  * quando um título era renomeado ou repetido. Agora `propostaId` é um UUID
- * imutável e, em assembleia FECHADA, o conteúdo do voto é cifrado antes de
- * chegar ao banco.
+ * imutável; a proposta é identificada por ele, e não pelo título.
  */
 
 // -----------------------------------------------------------------------------
@@ -46,12 +45,17 @@ export const COLECOES = {
    */
   VOTOS: 'votos',
   /**
-   * Espelho ANÔNIMO do voto, para o síndico poder apurar.
+   * Espelho do voto, para o síndico poder apurar.
    *
-   * Contém apenas proposta e opção — sem número de unidade, sem uid e sem
-   * horário. É o que permite ao síndico somar os votos sem saber quem votou o
-   * quê, resolvendo a contradição entre "o síndico apura" e "o síndico não lê
-   * votos". A regra exige que este documento exista com a MESMA opção do voto.
+   * Contém `propostaId` e `opcao` — sem uid e sem horário. A regra exige que este
+   * documento exista com a MESMA opção do voto.
+   *
+   * LIMITAÇÃO HONESTA: o ID do documento e o campo `tag` são o número
+   * normalizado da unidade (`a ~ b ~ tag`). Quem pode ler esta coleção (o
+   * síndico/operador) consegue, portanto, montar a tabela "unidade → opção". O
+   * sigilo perante o síndico não é garantido por este espelho; ver a nota no
+   * README. A alternativa (anonimizar de vez) quebraria a exclusão de
+   * inadimplentes, que depende de cruzar a `tag` com o catálogo.
    */
   VOTOS_CONTAGEM: 'votos_contagem',
   /** Snapshot final da apuração, gravado no encerramento: a base da ata. */
@@ -92,7 +96,7 @@ export const MODOS_VALIDOS = Object.values(MODOS);
 
 export const ROTULOS_MODO = {
   [MODOS.ABERTA]: 'Votação aberta',
-  [MODOS.FECHADA]: 'Votação fechada',
+  [MODOS.FECHADA]: 'Votação restrita',
 };
 
 export const DESCRICAO_MODO = {
@@ -100,11 +104,13 @@ export const DESCRICAO_MODO = {
     'O voto fica registrado junto ao número da unidade. Qualquer participante '
     + 'pode ver quem votou o quê.',
   [MODOS.FECHADA]:
-    'O voto NÃO é exibido ao síndico nem aos moradores, em nenhum momento. '
-    + 'Durante a votação não há placar: a contagem por opção só é publicada no '
-    + 'encerramento, uma única vez, e não pode ser alterada depois. A '
-    + 'identificação de como cada unidade votou fica restrita ao administrador '
-    + 'do sistema.',
+    'O voto NÃO é exibido nas telas do sistema — nem ao síndico, nem aos '
+    + 'moradores. Durante a votação não há placar: a contagem por opção só é '
+    + 'publicada no encerramento, uma única vez, e não pode ser alterada depois. '
+    + 'A leitura do voto individual (com unidade e autor) é restrita ao '
+    + 'administrador do sistema. Limitação registrada no README: o espelho usado '
+    + 'para apurar é legível pelos operadores e vincula a opção ao número da '
+    + 'unidade.',
 };
 
 export const STATUS_ASSEMBLEIA = {
@@ -128,27 +134,6 @@ export const PAPEIS = {
   MORADOR: 'morador',
   SINDICO: 'sindico',
   SUPER_ADMIN: 'super_admin',
-};
-
-/** Ações registradas na trilha de auditoria. */
-export const ACOES_AUDITORIA = {
-  ASSEMBLEIA_CRIADA: 'assembleia_criada',
-  ASSEMBLEIA_ENCERRADA: 'assembleia_encerrada',
-  CHECKIN: 'checkin',
-  VOTO_REGISTRADO: 'voto_registrado',
-  /**
-   * Identificação de como cada unidade votou. Ação do SUPER ADMIN, registrada
-   * de forma permanente: autor, data, escopo e finalidade ficam gravados.
-   */
-  VOTOS_ABERTOS: 'votos_abertos',
-  ADMIN_DEFINIDO: 'admin_definido',
-  CATALOGO_ALTERADO: 'catalogo_alterado',
-  /** Promoção do operador do sistema. Evento raro e de alto impacto. */
-  SUPER_ADMIN_DEFINIDO: 'super_admin_definido',
-  /** Criação de acesso de síndico pelo super admin. */
-  SINDICO_CRIADO: 'sindico_criado',
-  /** Revogação de acesso de síndico. */
-  SINDICO_REMOVIDO: 'sindico_removido',
 };
 
 // -----------------------------------------------------------------------------
@@ -207,9 +192,9 @@ export function normalizarNumeroUnidade(numero) {
  * valor que o contivesse criaria uma parte a mais na contagem que as regras do
  * Firestore fazem (`split('~').size()`), fazendo a criação ser negada.
  *
- * Tags reais são base64 (A-Z a-z 0-9 + / =), então na prática só o `/` seria
- * escapado — mas a função é defensiva porque o catálogo aceita número livre,
- * digitado pelo síndico.
+ * Tags reais aqui são o número normalizado da unidade (A-Z 0-9 e poucos sinais),
+ * então na prática só o `/` seria escapado — mas a função é defensiva porque o
+ * catálogo aceita número livre, digitado pelo síndico.
  */
 export function segmentoId(valor) {
   return String(valor ?? '').replace(/~/g, '%7E').replace(/\//g, '%2F');
@@ -281,48 +266,26 @@ export function compararNumeroUnidade(a, b) {
 
 /** ID em `comprovantes`: uma sessão por (assembleia, unidade).
  *
- * O nome do documento usa a TAG da unidade (um HMAC), não o número. Guardar o
- * número no caminho do documento recriaria o problema que este modelo existe
- * para resolver: quem lê a coleção `comprovantes` montaria a lista de quem
- * participou, e cruzando com o nome determinístico da cédula voltaria a existir
- * a tabela "unidade → voto".
+ * O nome do documento usa a TAG da unidade. Neste modelo a TAG é o próprio
+ * número normalizado (`normalizarNumeroUnidade`), e não um HMAC — não há
+ * servidor para calcular segredos. Consequência registrada no README: quem lê a
+ * coleção `comprovantes` consegue reconstruir a lista de quem participou, porque
+ * o número está no caminho do documento.
  */export function idComprovante(assembleiaId, tagUnidade) {
   return `${segmentoId(assembleiaId)}${SEP}${segmentoId(tagUnidade)}`;
 }
 
 /** ID em `votos`: uma cédula por (assembleia, proposta, unidade).
  *
- * `tagUnidade` é o HMAC da unidade. É este ID determinístico — e não uma
- * consulta — que garante "uma unidade vota uma vez": o Firestore não tem
+ * `tagUnidade` é o número normalizado da unidade. É este ID determinístico — e
+ * não uma consulta — que garante "uma unidade vota uma vez": o Firestore não tem
  * constraint de unicidade, então o caminho do documento faz esse papel.
  */
 export function idVoto(assembleiaId, propostaId, tagUnidade) {
   return `${segmentoId(assembleiaId)}${SEP}${segmentoId(propostaId)}${SEP}${segmentoId(tagUnidade)}`;
 }
 
-/** ID em `contagem`: uma linha de total por (assembleia, proposta, opção). */
-export function idContagem(assembleiaId, propostaId, opcao) {
-  return `${segmentoId(assembleiaId)}${SEP}${segmentoId(propostaId)}${SEP}${segmentoId(codificarOpcao(opcao))}`;
-}
-
-/** ID do contador de participação: um por assembleia. */
-export function idParticipacao(assembleiaId) {
-  return segmentoId(assembleiaId);
-}
-
-/**
- * Codifica a opção para uso em ID de documento. O Firestore rejeita `/` em IDs, e
- * a chave de campo `votosComputados.{titulo}` usada antes quebrava quando o
- * título tinha ponto, barra ou espaço.
- */
-export function codificarOpcao(opcao) {
-  return String(opcao ?? '')
-    .trim()
-    .replace(/\//g, '∕') // barra de divisão U+2215: visualmente igual, válida em ID
-    .replace(/\s+/g, '_');
-}
-
-/** `crypto.randomUUID` existe no browser e no Node >= 19 (runtime das Functions). */
+/** `crypto.randomUUID` existe no browser e no Node >= 19. */
 function uuid() {
   return globalThis.crypto.randomUUID();
 }
@@ -338,65 +301,7 @@ export function novaAssembleiaId() {
 }
 
 // -----------------------------------------------------------------------------
-// Envelope de criptografia (assembleia FECHADA)
-// -----------------------------------------------------------------------------
-//
-// O voto é cifrado com AES-256-GCM usando uma chave que existe SOMENTE no Secret
-// Manager, acessível apenas pelas Cloud Functions. A chave nunca chega ao
-// cliente e nunca é gravada no Firestore.
-//
-// Consequências verificáveis:
-//  - Quem lê o Firestore (inclusive pelo console) vê apenas ruído.
-//  - Duas pessoas votando "Sim" produzem criptogramas diferentes (IV aleatório),
-//    então não há padrão para correlacionar.
-//  - A única forma de ler é chamar `abrirVotos`, que exige admin e registra a
-//    leitura em /auditoria.
-
-export const CRYPTO = {
-  ALGORITMO: 'aes-256-gcm',
-  VERSAO: 'v1',
-  TAMANHO_IV: 12, // 96 bits: recomendado para GCM
-  TAMANHO_CHAVE: 32, // 256 bits
-  TAMANHO_TAG: 16,
-  /** Segredo do Secret Manager que cifra a cédula. */
-  SEGREDO: 'IPEVOX_KEK',
-  /** Variável de ambiente equivalente (emulador e execução local). */
-  ENV: 'IPEVOX_KEK',
-  /**
-   * Segredo SEPARADO, usado para pseudonimizar a unidade e publicar o
-   * compromisso verificável do voto.
-   *
-   * Por que separado, e não a mesma chave: esta é lida apenas no ENCERRAMENTO.
-   * Enquanto a assembleia está em andamento, a função `votar` não tem como
-   * derivar o identificador opaco de uma cédula a partir do vínculo guardado no
-   * comprovante — ou seja, nem quem opera a infraestrutura consegue correlacionar
-   * voto e unidade durante a votação.
-   */
-  SEGREDO_HASH: 'IPEVOX_HASH_KEY',
-  /**
-   * Contexto autenticado (AAD) do envelope. Amarra o criptograma à versão, à
-   * assembleia, à proposta e à TAG da unidade — de modo que copiar uma cédula
-   * para a linha de outra unidade não abre, mesmo com a chave em mãos.
-   */
-  aad(assembleiaId, propostaId, tagDaUnidade = '') {
-    return `${CRYPTO.VERSAO}:${assembleiaId}:${propostaId}:${tagDaUnidade}`;
-  },
-};
-
-/** Monta o documento de voto em assembleia FECHADA. */
-export function envelopeVotoSelado({ iv, ciphertext, authTag }) {
-  return {
-    selado: true,
-    v: CRYPTO.VERSAO,
-    alg: CRYPTO.ALGORITMO,
-    iv,
-    ciphertext,
-    authTag,
-  };
-}
-
-// -----------------------------------------------------------------------------
-// Validação (compartilhada entre Cloud Functions, cliente e testes)
+// Validação (compartilhada entre cliente e testes)
 // -----------------------------------------------------------------------------
 
 /**

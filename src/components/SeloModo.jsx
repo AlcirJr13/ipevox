@@ -19,7 +19,9 @@ const ESTILO = {
   [MODOS.FECHADA]: {
     caixa: 'bg-indigo-900/30 border-indigo-700 text-indigo-200',
     Icone: IconeCadeado,
-    resumo: 'Votos cifrados no banco. Leitura exige abertura formal registrada.',
+    resumo:
+      'Votos não são exibidos nas telas. Leitura do voto individual restrita ao '
+      + 'administrador do sistema.',
   },
   [MODOS.ABERTA]: {
     caixa: 'bg-blue-900/30 border-blue-700 text-blue-200',

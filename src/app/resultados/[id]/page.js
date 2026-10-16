@@ -304,7 +304,7 @@ export default function Resultados() {
               </span>
             ) : (
               <span className="px-3 py-1 rounded-full text-xs font-medium bg-indigo-900/50 text-indigo-200 border border-indigo-700">
-                Votação fechada (sigilosa)
+                Votação restrita
               </span>
             )}
           </div>
@@ -423,7 +423,7 @@ export default function Resultados() {
             Unidades inadimplentes registradas ({exibicao.unidadesInadimplentes})
           </p>
           <p className="text-amber-200/70">
-            Os votos de unidades inadimplentes são registrados para auditoria, mas não entram na contagem de deliberação.
+            Os votos de unidades inadimplentes ficam registrados, mas não entram na contagem de deliberação.
             {exibicao.votosExcluidos > 0 && ` (${exibicao.votosExcluidos} voto(s) desconsiderado(s)).`}
           </p>
         </div>
@@ -458,7 +458,7 @@ export default function Resultados() {
 
                 <div className="shrink-0">
                   <span className="px-4 py-1.5 bg-gray-900 text-gray-300 rounded-full text-xs font-mono font-medium border border-gray-700 shadow-sm">
-                    {votosVisiveis ? `${totalVotos} voto(s)` : '🔒 sigiloso'}
+                    {votosVisiveis ? `${totalVotos} voto(s)` : '🔒 ainda não publicado'}
                   </span>
                 </div>
               </div>
@@ -661,10 +661,10 @@ export default function Resultados() {
                 </div>
               )}
 
-              {/* Informação sobre sigilo se a votação for restrita */}
+              {/* Informação sobre o modo restrito */}
               {!ehVotacaoAberta && (
                 <div className="mt-5 pt-3 border-t border-gray-700/80 text-xs text-gray-500 flex items-center gap-1.5">
-                  <span>🔒 Votação fechada: os votos individuais por unidade são sigilosos.</span>
+                  <span>🔒 Votação restrita: os votos individuais por unidade não são exibidos no sistema.</span>
                 </div>
               )}
             </div>

@@ -22,9 +22,8 @@
  *   node --env-file=.env.local scripts/seed-unidades.mjs          # 1 a 59
  *   node --env-file=.env.local scripts/seed-unidades.mjs 1 120
  *
- * Observação: para o uso do dia a dia, prefira /admin/unidades — que passa pela
- * Cloud Function e deixa registro na trilha de auditoria. Este script é para o
- * provisionamento inicial.
+ * Observação: para o uso do dia a dia, prefira /admin/unidades, que é a tela de
+ * gestão do catálogo. Este script é para o provisionamento inicial, em lote.
  */
 
 import { readFileSync } from 'node:fs';

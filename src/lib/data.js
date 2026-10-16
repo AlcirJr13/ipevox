@@ -8,8 +8,11 @@
  *
  *   /resultados/{id}      — contagens por opção. Legível por qualquer
  *                           participante. É o que morador e síndico veem.
- *   /votos_contagem/{id}  — proposta e opção, sem unidade e sem autor. Legível
- *                           por operadores, para apurar.
+ *   /votos_contagem/{id}  — proposta e opção, com a tag (número) da unidade.
+ *                           Legível por operadores, para apurar. Como o ID e a
+ *                           tag embutem o número, o operador consegue associar
+ *                           opção a unidade ao ler esta coleção — limitação
+ *                           registrada no README.
  *   /votos/{id}           — o voto completo. Legível SOMENTE pelo administrador
  *                           do sistema (definido por e-mail nas regras).
  *
@@ -32,6 +35,7 @@ import {
   STATUS_ASSEMBLEIA,
   apurarAssembleia,
   compararNumeroUnidade,
+  idComprovante,
   normalizarNumeroUnidade,
 } from './schema';
 
@@ -113,7 +117,7 @@ export async function lerCatalogo() {
  * que torna esta leitura um `get` por caminho conhecido, sem consulta.
  */
 export async function lerComprovante(assembleiaId, numero) {
-  const id = `${assembleiaId}~${normalizarNumeroUnidade(numero)}`;
+  const id = idComprovante(assembleiaId, normalizarNumeroUnidade(numero));
   const snap = await getDoc(doc(obterDb(), COLECOES.COMPROVANTES, id));
   return snap.exists() ? { id: snap.id, ...snap.data() } : null;
 }
@@ -158,38 +162,11 @@ export function escutarResultado(assembleiaId, aoAtualizar, aoFalhar) {
 }
 
 /**
- * Contagem por (proposta, opção), a partir do espelho anônimo.
- *
- * É o que alimenta a publicação do resultado. Não devolve nada por voto: apenas
- * os totais — e só quando alguém com permissão pede a apuração.
- */
-export async function contarVotos(assembleiaId) {
-  const snap = await getDocs(
-    query(
-      collection(obterDb(), COLECOES.VOTOS_CONTAGEM),
-      where('assembleiaId', '==', assembleiaId)
-    )
-  );
-
-  const contagens = {};
-  snap.forEach((d) => {
-    const { propostaId, opcao } = d.data();
-    if (!propostaId || !opcao) return;
-    const linha = (contagens[propostaId] ??= {});
-    linha[opcao] = (linha[opcao] ?? 0) + 1;
-  });
-
-  return { contagens, total: snap.size };
-}
-
-/**
  * Votos individuais — COM autor e unidade.
  *
  * Só o administrador do sistema consegue ler isto: a regra de `/votos` nega para
- * todo o resto, inclusive para o síndico. Usado apenas na tela de auditoria.
- */
-/**
- * Votos individuais — leitura pontual.
+ * todo o resto, inclusive para o síndico. Usado apenas na tela de leitura de
+ * votos do administrador.
  */
 export async function lerVotosIndividuais(assembleiaId) {
   const snap = await getDocs(
@@ -248,7 +225,7 @@ export function montarApuracaoAoVivo({
   const inadimplentesSet = new Set(
     catalogo
       .filter((u) => u.inadimplente === true)
-      .map((u) => String(u.numero ?? '').trim().toUpperCase().replace(/^0+(?=\d)/, ''))
+      .map((u) => normalizarNumeroUnidade(u.numero))
       .filter(Boolean)
   );
 
@@ -258,7 +235,7 @@ export function montarApuracaoAoVivo({
 
   // Unidades que já votaram (pelo menos um voto registrado)
   const unidadesQueVotaramSet = new Set(
-    votos.map((v) => String(v.numero ?? v.tag ?? '').trim().toUpperCase().replace(/^0+(?=\d)/, '')).filter(Boolean)
+    votos.map((v) => normalizarNumeroUnidade(v.numero ?? v.tag)).filter(Boolean)
   );
   const totalUnidadesVotaram = Math.max(
     participacao?.unidadesQueVotaram ?? 0,
@@ -371,33 +348,6 @@ export function montarApuracaoAoVivo({
   };
 }
 
-/**
- * Monta a apuração para exibição a partir do resultado PUBLICADO (mantido por compatibilidade).
- */
-export function montarApuracaoDeResultado({ resultado, unidadesAptas, participacao }) {
-  if (!resultado?.apuracao) {
-    return {
-      propostas: [],
-      totalParticipacoes: 0,
-      unidadesAptas: 0,
-      unidadesQueVotaram: participacao?.unidadesQueVotaram ?? 0,
-      publicado: false,
-    };
-  }
-
-  return {
-    propostas: resultado.apuracao,
-    totalParticipacoes: resultado.totalVotos ?? 0,
-    unidadesAptas: resultado.unidadesAptas ?? unidadesAptas ?? 0,
-    unidadesAptasCadastro: resultado.unidadesAptasCadastro ?? unidadesAptas ?? 0,
-    unidadesInadimplentes: resultado.unidadesInadimplentes ?? 0,
-    votosExcluidos: resultado.votosExcluidos ?? 0,
-    unidadesQueVotaram: participacao?.unidadesQueVotaram ?? 0,
-    publicado: true,
-    publicadoEm: resultado.publicadoEm ?? null,
-  };
-}
-
 /** Apuração calculada, para a tela de publicação. Reusa o schema testado. */
 export function calcularApuracao({ propostas, contagens, unidadesAptas }) {
   return apurarAssembleia({ propostas, contagens, unidadesAptas });
@@ -430,77 +380,6 @@ export function proximaPropostaPendente(propostas, votouEm = []) {
       .filter(Boolean)
   );
   return propostas.findIndex((p) => !jaVotadas.has(p.id));
-}
-
-// -----------------------------------------------------------------------------
-// Compatibilidade com as telas escritas para o modelo com placar ao vivo
-// -----------------------------------------------------------------------------
-
-/**
- * "Contagem ao vivo" não existe mais: o projeto decidiu não mostrar placar
- * parcial durante a votação, para o número não influenciar quem ainda vai votar.
- *
- * Esta função permanece para as telas que a importavam e devolve, uma única vez,
- * o resultado PUBLICADO convertido para o formato de contagens. Se não houver
- * resultado publicado, devolve vazio — e a tela mostra o estado "ainda não
- * apurado", que é a informação correta.
- */
-export function escutarContagem(assembleiaId, aoAtualizar, aoFalhar) {
-  return onSnapshot(
-    doc(obterDb(), COLECOES.RESULTADOS, assembleiaId),
-    (snap) => {
-      if (!snap.exists()) {
-        aoAtualizar({});
-        return;
-      }
-
-      const contagens = {};
-      (snap.data().apuracao ?? []).forEach((prop) => {
-        const linha = (contagens[prop.propostaId] ??= {});
-        (prop.opcoes ?? []).forEach((o) => {
-          linha[o.opcao] = o.votos ?? 0;
-        });
-      });
-      aoAtualizar(contagens);
-    },
-    (erro) => aoFalhar?.(erro)
-  );
-}
-
-/**
- * Monta a apuração exibida a partir do resultado publicado.
- *
- * Nome mantido por compatibilidade com as telas existentes. A diferença em
- * relação à versão com servidor: o total NÃO é somado de contadores ao vivo, e
- * sim lido do documento de resultado — que é imutável por regra. Sem resultado
- * publicado, devolve lista vazia, nunca zeros (zeros pareceriam "ninguém votou").
- */
-export function montarApuracao({ assembleia, propostas = [], resultado, participacao }) {
-  const publicado = resultado?.apuracao;
-
-  if (!publicado) {
-    return {
-      propostas: [],
-      totalParticipacoes: 0,
-      unidadesAptas: assembleia?.unidadesAptas ?? 0,
-      unidadesQueVotaram: participacao?.unidadesQueVotaram ?? 0,
-      publicado: false,
-      modo: assembleia?.modo ?? null,
-      status: assembleia?.status ?? null,
-    };
-  }
-
-  return {
-    propostas: publicado,
-    totalParticipacoes: resultado.totalVotos ?? 0,
-    unidadesAptas: resultado.unidadesAptas ?? assembleia?.unidadesAptas ?? 0,
-    unidadesQueVotaram: participacao?.unidadesQueVotaram ?? 0,
-    publicado: true,
-    publicadoEm: resultado.publicadoEm ?? null,
-    modo: assembleia?.modo ?? null,
-    status: assembleia?.status ?? null,
-    propostasBase: propostas,
-  };
 }
 
 export { normalizarNumeroUnidade };

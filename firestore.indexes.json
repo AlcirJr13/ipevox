@@ -17,27 +17,11 @@
       ]
     },
     {
-      "collectionGroup": "apuracao",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "assembleiaId", "order": "ASCENDING" },
-        { "fieldPath": "propostaId", "order": "ASCENDING" }
-      ]
-    },
-    {
       "collectionGroup": "comprovantes",
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "assembleiaId", "order": "ASCENDING" },
         { "fieldPath": "status", "order": "ASCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "auditoria",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "assembleiaId", "order": "ASCENDING" },
-        { "fieldPath": "em", "order": "DESCENDING" }
       ]
     },
     {

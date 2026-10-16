@@ -197,10 +197,10 @@ export default function HistoricoAssembleias() {
                     <div className="flex flex-wrap items-center gap-2">
                       {/*
                         O modo fica em destaque porque é ele que decide se o voto
-                        poderá ser lido depois: em votação fechada o conteúdo é
-                        cifrado e só uma abertura registrada em auditoria o revela.
-                        Era informação fácil de passar despercebida e caro de
-                        descobrir tarde.
+                        aparece nas telas: em votação restrita os votos individuais
+                        não são exibidos, e só o administrador do sistema lê o voto
+                        com unidade e autor. Era informação fácil de passar
+                        despercebida e caro de descobrir tarde.
                       */}
                       <span
                         className={`px-3 py-1 rounded-full text-sm font-semibold border flex items-center gap-2 ${selada
@@ -209,7 +209,9 @@ export default function HistoricoAssembleias() {
                           }`}
                       >
                         <span aria-hidden="true">{selada ? '🔒' : '👁️'}</span>
-                        {selada ? 'Votação fechada' : 'Votação aberta'}
+                        {selada
+                          ? ROTULOS_MODO[MODOS.FECHADA]
+                          : ROTULOS_MODO[MODOS.ABERTA]}
                       </span>
 
                       <span

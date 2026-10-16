@@ -90,10 +90,10 @@ export default function LandingPage() {
   // duas afirmações deixaram de ser verdade quando o projeto passou a operar só
   // com recursos gratuitos, e foram reescritas para descrever o que existe.
   const itensVotacaoRestrita = [
-    'O voto NÃO é exibido ao síndico nem aos outros moradores em nenhum momento',
+    'O voto NÃO é exibido nas telas do sistema — nem ao síndico, nem aos outros moradores',
     'Durante a votação não há placar: ninguém vê a contagem parcial',
     'A contagem por opção é publicada uma única vez, no encerramento, e não pode ser alterada depois',
-    'Só o administrador do sistema consegue ver os votos individualmente'
+    'A leitura do voto individual, com unidade e autor, é restrita ao administrador do sistema'
   ];
 
   return (
@@ -213,7 +213,7 @@ export default function LandingPage() {
               <div aria-hidden="true" className="text-5xl mb-4 transition-transform group-hover:scale-110">🔐</div>
               <h3 className="text-xl font-semibold mb-3 text-white">Sigilo sob controle</h3>
               <p className="text-gray-400 leading-relaxed">
-                A assembleia escolhe entre voto aberto e voto selado, e o morador sabe qual regra vale antes de votar
+                A assembleia escolhe entre voto aberto e voto restrito, e o morador sabe qual regra vale antes de votar
               </p>
             </div>
 
@@ -299,7 +299,7 @@ export default function LandingPage() {
                   em texto claro no banco seria promessa falsa. */}
               <div className="group bg-gradient-to-br from-green-900/20 to-green-800/10 border border-green-500/20 rounded-2xl p-10 hover:border-green-500/50 transition-all duration-300 hover:shadow-2xl hover:shadow-green-500/10">
                 <div aria-hidden="true" className="text-4xl mb-6">🔐</div>
-                <h4 className="text-2xl font-semibold mb-6 text-green-400">Votação fechada</h4>
+                <h4 className="text-2xl font-semibold mb-6 text-green-400">Votação restrita</h4>
                 <ul className="space-y-4">
                   {itensVotacaoRestrita.map((item) => (
                     <li key={item} className="flex items-start gap-3 text-gray-300 group-hover:text-white transition-colors">
@@ -354,7 +354,7 @@ export default function LandingPage() {
               <span className="text-xl font-bold text-white">ipevox</span>
             </div>
             <p className="text-sm mb-3">
-              Cada assembleia é criada no modo aberto ou selado —{' '}
+              Cada assembleia é criada no modo aberto ou restrito —{' '}
               <a href="#sigilo" className="text-gray-300 hover:text-white underline underline-offset-4">
                 veja as regras de sigilo
               </a>.

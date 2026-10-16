@@ -216,7 +216,7 @@ const opcoesDaProposta = (proposta) => {
 };
 
 const rotuloModo = (modo) => {
-  if (modo === 'fechada') return 'Votação fechada (voto selado)';
+  if (modo === 'fechada') return 'Votação restrita';
   if (modo === 'aberta') return 'Votação aberta (voto atribuível)';
   return 'Não informado';
 };
@@ -238,18 +238,7 @@ const RelatorioPDF = ({ snapshot }) => {
 
   const propostas = ordenarPropostas(apuracao.propostas);
 
-  // O snapshot não traz `votosSelados`/`votosAbertos`; derivamos do modo:
-  // votação aberta (voto atribuível) = votos abertos; restrita = votos selados.
   const votosRegistrados = formatarNumero(dados.totalVotos, 0);
-  const votacaoAberta = dados.modo === 'aberta';
-  const votosSelados = formatarNumero(
-    dados.votosSelados,
-    votacaoAberta ? 0 : votosRegistrados,
-  );
-  const votosAbertos = formatarNumero(
-    dados.votosAbertos,
-    votacaoAberta ? votosRegistrados : 0,
-  );
 
   const renderizarOpcao = (opcao, lider) => (
     <View key={opcao.chave} style={styles.opcao} wrap={false}>
@@ -407,32 +396,20 @@ const RelatorioPDF = ({ snapshot }) => {
           </View>
           <View style={styles.infoLinha}>
             <Text style={styles.infoLabel}>Registros de voto</Text>
-            <Text style={styles.infoValor}>
-              {votosRegistrados} votos ({votosSelados} selados · {votosAbertos} abertos)
-            </Text>
+            <Text style={styles.infoValor}>{votosRegistrados} votos</Text>
           </View>
-          {dados.algoritmo || dados.versaoEnvelope ? (
-            <View style={styles.infoLinha}>
-              <Text style={styles.infoLabel}>Envelope criptográfico</Text>
-              <Text style={styles.infoValor}>
-                {dados.algoritmo || '—'}
-                {dados.versaoEnvelope ? ` · ${dados.versaoEnvelope}` : ''}
-              </Text>
-            </View>
-          ) : null}
         </View>
 
         {dados.modo === 'restrita' || dados.modo === 'fechada' ? (
           <View style={styles.aviso} wrap={false}>
-            <Text style={styles.avisoTitulo}>Votação fechada — sigilo declarado</Text>
+            <Text style={styles.avisoTitulo}>Votação restrita — sigilo declarado</Text>
             <Text style={styles.avisoTexto}>
-              Os votos desta assembleia foram registrados no banco de dados com
-              leitura bloqueada para o síndico e para os demais participantes. A
-              contagem por opção foi publicada uma única vez, no encerramento, e não
-              pode ser alterada depois. A identificação de como cada unidade votou é
-              acessível exclusivamente ao administrador do sistema, que responde por
-              esse acesso. Este documento registra o resultado; a conferência voto a
-              voto é feita fora dele.
+              Os votos desta assembleia não são exibidos nas telas do sistema, nem
+              ao síndico nem aos moradores. A contagem por opção foi publicada uma
+              única vez, no encerramento, e não pode ser alterada depois. A leitura
+              do voto individual, com unidade e autor, é restrita ao administrador
+              do sistema, que responde por esse acesso. Este documento registra o
+              resultado; a conferência voto a voto é feita fora dele.
             </Text>
           </View>
         ) : null}

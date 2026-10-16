@@ -6,25 +6,22 @@
  * em vez de título, percentual com base de cálculo explícita. Estes testes
  * travam cada uma dessas decisões.
  *
- * Rode com: npm --prefix functions test
+ * Rode com: npm test
  */
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
-  ACOES_AUDITORIA,
   COLECOES,
   MAX_OPCOES,
   MODOS,
   PAPEIS,
   apurarAssembleia,
   apurarProposta,
-  codificarOpcao,
   compararNumeroUnidade,
   contarVotosConsiderados,
   idComprovante,
-  idContagem,
   idUnidadeCatalogo,
   idVoto,
   normalizarNumeroUnidade,
@@ -124,19 +121,6 @@ describe('IDs determinísticos', () => {
     }
   });
 
-  it('produz IDs válidos para o Firestore (sem barra)', () => {
-    // O Firestore rejeita "/" em ID de documento. A versão anterior usava o
-    // título da proposta como CAMINHO DE CAMPO (`votosComputados.{titulo}`), o
-    // que quebrava com ponto, barra ou espaço no título.
-    const opcoes = ['Sim', 'Não', 'A/B', 'Opção com espaço', 'Aprovar a reforma'];
-    for (const opcao of opcoes) {
-      const codificada = codificarOpcao(opcao);
-      assert.ok(!codificada.includes('/'), `barra sobreviveu em "${opcao}"`);
-      assert.ok(!codificada.includes(' '), `espaço sobreviveu em "${opcao}"`);
-      assert.ok(idContagem('asb_1', 'prop_1', opcao).length > 0);
-    }
-  });
-
   it('nunca gera barra em nenhum dos IDs determinísticos', () => {
     // Esta invariante é o que permite às regras do Firestore recuperarem a
     // assembleia a partir do ID do documento (`id.split('~')[0]`) e o que impede
@@ -147,7 +131,6 @@ describe('IDs determinísticos', () => {
     for (const entrada of entradas) {
       gerados.push(idComprovante('asb_1', entrada));
       gerados.push(idVoto('asb_1', 'prop_1', entrada));
-      gerados.push(idContagem('asb_1', 'prop_1', entrada));
       gerados.push(idUnidadeCatalogo(entrada));
     }
 
@@ -259,29 +242,6 @@ describe('coleções do modelo sem servidor', () => {
     assert.equal(PAPEIS.SINDICO, 'sindico');
     assert.equal(PAPEIS.SUPER_ADMIN, 'super_admin');
     assert.equal(Object.keys(PAPEIS).length, 3);
-  });
-
-  it('registra em auditoria os eventos de gestão de acesso', () => {
-    // Sem estes eventos, criar e revogar acesso de síndico seria invisível — e
-    // uma permissão concedida por engano nunca apareceria na trilha.
-    assert.equal(ACOES_AUDITORIA.SUPER_ADMIN_DEFINIDO, 'super_admin_definido');
-    assert.equal(ACOES_AUDITORIA.SINDICO_CRIADO, 'sindico_criado');
-    assert.equal(ACOES_AUDITORIA.SINDICO_REMOVIDO, 'sindico_removido');
-  });
-
-  it('nomeia a identificação de votos sem atribuí-la ao síndico', () => {
-    // Regressão de uma decisão explícita: identificar como cada unidade votou é
-    // ação do ADMINISTRADOR DO SISTEMA, não do síndico. O nome do evento dizia
-    // "pelo síndico" porque o poder era dele; foi renomeado quando o poder saiu.
-    // Se alguém reintroduzir o nome antigo, é sinal de que a regra pode ter
-    // voltado atrás sem ninguém perceber.
-    assert.equal(ACOES_AUDITORIA.VOTOS_ABERTOS, 'votos_abertos');
-    assert.equal(ACOES_AUDITORIA.VOTOS_ABERTOS_PELO_ADMIN, undefined);
-  });
-
-  it('não repete valores entre as ações de auditoria', () => {
-    const valores = Object.values(ACOES_AUDITORIA);
-    assert.equal(new Set(valores).size, valores.length);
   });
 });
 
